@@ -1,0 +1,389 @@
+<!doctype html>
+{% from "_mark.html" import mark, mark_a %}
+<html lang="en"{% if public_mode %} class="skin-a"{% endif %}>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+{% if public_mode %}<meta name="theme-color" content="#FFF6EE" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#151024" media="(prefers-color-scheme: dark)">
+{% else %}<meta name="theme-color" content="#03161c">
+{% endif %}<title>{% block title %}Sweep{% endblock %}</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon-a.svg' if public_mode else 'favicon.svg') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='sweep.css') }}">
+{% if public_mode %}<link rel="stylesheet" href="{{ url_for('static', filename='sweep-a.css') }}">
+{# Not deferred: it sets data-theme before the first paint, so there is no flash of the wrong theme. #}
+<script src="{{ url_for('static', filename='theme.js') }}"></script>
+{# Deferred: it only tidies tips once the page exists. Without it every tip simply stays. #}
+<script defer src="{{ url_for('static', filename='tips.js') }}"></script>
+{# Deferred: disclosures open and close with a short height and fade when motion is allowed. Without it (or with reduced motion) the browser's own <details> toggles. #}
+<script defer src="{{ url_for('static', filename='peek.js') }}"></script>
+{# Deferred: the pressed button and the painted line while the next page loads. Without it a press waits as before. #}
+<link rel="stylesheet" href="{{ url_for('static', filename='going.css') }}">
+<script defer src="{{ url_for('static', filename='going.js') }}"></script>
+{# Deferred: five quiet sounds, on unless the header's speaker switch turns them off. #}
+<script defer src="{{ url_for('static', filename='sound.js') }}"></script>
+{% endif %}{# A screen may add to the head. Results does, for one script that has to run before the first paint. #}
+{% block head %}{% endblock %}
+{# Fonts come from Google; the typography is part of the design the spec
+   asked for, and a stylesheet cannot execute code. It does mean each page
+   view sends a request to Google, which the README says plainly rather than
+   claiming more privacy than this delivers. Removing the link costs only the
+   display face — every stack in sweep.css has a system fallback. #}
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+{% if public_mode %}<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=Instrument+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+{% else %}<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&family=Geist:wght@400;500;600;700&display=swap" rel="stylesheet">
+{% endif %}{# Alpine is vendored, not loaded from a CDN. This page is also /key, where
+   the user pastes the one credential this tool exists to protect, and a
+   third-party script that can read the DOM does not belong there. A CDN that
+   cannot be reached also takes the live cost meter down silently, which
+   reads as "the estimate stopped moving" — on the money screen. #}
+<script defer src="{{ url_for('static', filename='alpine-3.14.1.min.js') }}"></script>
+
+{# First in the tab order; the target is the empty anchor just before <main>
+   (tests, and the header-versus-page split they make, key on the literal
+   "<main>", so the landmark itself is left alone). The anchor has no
+   tabindex: following a fragment moves the browser's sequential-focus start
+   to it, so the next Tab lands in the page, and the results test that forbids
+   a tabindex anywhere on the screen (a duplicate stop per row) stays true. #}
+<a class="skip-link" href="#main-content">Skip to main content</a>
+{%- if public_mode %}<div class="going-line" data-going-line aria-hidden="true"><div class="going-fill"><svg class="going-tip" viewBox="0 0 70 70"><path d="M50 4 L33 32" stroke="#1E1530" stroke-width="7" stroke-linecap="round"/><path d="M24 27 L42 38 L35 56 C26 59 12 54 7 45 Z" fill="#E4F25C" stroke="#1E1530" stroke-width="4" stroke-linejoin="round"/></svg></div></div>{% endif %}
+
+<header>
+  <div class="brand">
+    <a class="lockup" href="{{ url_for('upload') }}">{% if public_mode %}{{ mark_a(26) }}{% else %}{{ mark(22) }}{% endif %}<strong>Sweep</strong></a>
+    {# The credit figure appears once, on the right. Repeating it here as a
+       "cap" chip the way the v3 mock does would name one number twice: this
+       app has no separate hard cap to show until the confirm screen. #}
+    {# Three states, not two: "no key yet" and "no key wanted" are different
+       facts about the same absent token, and only one of them is something
+       still to do. #}
+    {# Public beta has no key and spends no Apify credit, so the whole
+       money chrome is off: a "No key yet" chip would be a to-do for
+       something a visitor cannot do, and the pills behind it carry the
+       operator's own key state. #}
+    {% if not public_mode %}
+    <span class="chip {% if free_only %}free{% elif cap_usd is not none %}on{% else %}quiet{% endif %}">
+      {%- if free_only %}Free sources only
+      {%- elif cap_usd is not none %}Key connected
+      {%- else %}No key yet{% endif -%}
+    </span>
+    {% endif %}
+  </div>
+  {# A tracker, not tabs. These seven are a sequence, and four of them
+     redirect away until their precondition is met — tabs implied you could
+     pick any of them. Reachability comes from step_states(), which reads the
+     same facts the route guards do, so this can never offer a step that
+     bounces you elsewhere.
+
+     One markup for both widths: below 64rem the CSS shows only where you are
+     and what is next, and reveals the count instead. #}
+  <nav class="tracker" aria-label="Progress through the sweep">
+    {# Position only. The current step's own chip is still on screen at every
+       width and already carries the label — naming it here too printed
+       "4 of 7 · Configure  ④ Configure". #}
+    <span class="tracker-at">
+      {%- for s in steps if s.current %}{{ s.n }} of {{ steps|length }}{% endfor -%}
+    </span>
+    <ol>
+      {% for s in steps %}
+        <li class="step{{ ' current' if s.current }}{{ ' done' if s.done }}{{ ' next' if s.next }}{{ ' locked' if not s.open }}">
+          {# href omitted rather than disabled: an anchor with no href is not
+             focusable or clickable, which is what a step you cannot open
+             should be. #}
+          {# Both attributes come from template text, never from {{ }}: an
+             attribute emitted as a VALUE has its quotes autoescaped, so
+             {{ 'aria-current="step"' if ... }} reaches the page as
+             aria-current=&#34;step&#34; and is not the attribute at all. The
+             tab nav this replaces carried exactly that, so aria-current had
+             never actually worked on any screen. #}
+          <a {% if s.open and not s.current %}href="{{ url_for(s.slug) }}"{% endif %}
+             {% if s.current %}aria-current="step"{% endif %}>
+            <span class="marker" aria-hidden="true">
+              {%- if s.done %}&check;{% else %}{{ s.n }}{% endif -%}
+            </span>
+            <span class="step-label">{{ s.label }}</span>
+            {%- if s.done %}<span class="visually-hidden">, done</span>
+            {%- elif not s.open %}<span class="visually-hidden">, not available yet</span>
+            {%- endif %}
+          </a>
+        </li>
+      {% endfor %}
+    </ol>
+  </nav>
+  {% if credit_left is not none %}
+    {# One text node on purpose: "Credit left $0.00" is asserted contiguously,
+       and a real zero must read as a figure rather than go missing. Public pages
+       say "Apify balance": the credit jar on Configure and Confirm says what THIS
+       sweep can draw ("$41.99 available"), and the header's "Credit left" read as
+       the same figure under another name. The label is the only thing that changes.
+
+       The TOTAL across every configured key, not cap_usd. cap_usd is what one
+       sweep can spend (a run picks the best single account and stays on it),
+       and calling that "credit left" understated the balance by every other
+       key on file. The confirm screen is where the one-account limit is
+       named, because that is where it decides something. #}
+    <span class="credit">{{ 'Apify balance' if public_mode else 'Credit left' }} ${{ '%.2f'|format(credit_left) }}</span>
+  {% endif %}
+  {%- if public_mode %}
+  {#- Hidden until sound.js finds it: without the script it would be a switch that does nothing. #}
+  <button type="button" class="sound-toggle" data-sound-toggle aria-pressed="false" hidden>
+    <span class="visually-hidden">Sound</span>
+    <svg class="spk-on" width="18" height="18" viewBox="0 0 18 18" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 7 H6 L10 3.5 V14.5 L6 11 H3 Z"/><path d="M12.5 6.5 C13.6 7.6 13.6 10.4 12.5 11.5 M14.6 4.6 C16.8 6.8 16.8 11.2 14.6 13.4"/>
+    </svg>
+    <svg class="spk-off" width="18" height="18" viewBox="0 0 18 18" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M3 7 H6 L10 3.5 V14.5 L6 11 H3 Z"/><path d="M12.5 7 L16 10.5 M16 7 L12.5 10.5"/>
+    </svg>
+  </button>
+  <button type="button" class="theme-toggle" data-theme-toggle aria-pressed="false">
+    <span class="visually-hidden">Dark mode</span>
+    <span class="theme-toggle-track">
+      <span class="theme-toggle-knob">
+        <svg class="sun" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+          <circle cx="8" cy="8" r="3"/>
+          <path d="M8 1.5v1.8M8 12.7v1.8M1.5 8h1.8M12.7 8h1.8M3.4 3.4l1.3 1.3M11.3 11.3l1.3 1.3M3.4 12.6l1.3-1.3M11.3 4.7l1.3-1.3"/>
+        </svg>
+        <svg class="moon" width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" focusable="false" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round">
+          <path d="M13.5 9.6A5.8 5.8 0 0 1 6.4 2.5a5.8 5.8 0 1 0 7.1 7.1z"/>
+        </svg>
+      </span>
+    </span>
+  </button>
+  {%- endif %}
+  {# Public only: the operator has no one to send feedback to. Hidden until
+     the script below finds <dialog> support, so it is never a dead button. #}
+  {% if public_mode %}
+  <button type="button" class="feedback-open" data-feedback-open
+          aria-haspopup="dialog" aria-controls="feedback" hidden>
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+      <path d="M2.5 2.5h11v8h-6l-3 3v-3h-2z" fill="none" stroke="currentColor"
+            stroke-width="1.4" stroke-linejoin="round"/>
+    </svg>
+    <span class="feedback-label">Feedback</span>
+  </button>
+  {% endif %}
+</header>
+
+{% if public_mode %}
+{# Native <dialog>: showModal() makes the page behind it inert, traps focus,
+   closes on Escape and gives focus back — no modal library to vendor. It sits
+   outside every screen's own form, so opening it touches nothing on the page. #}
+<dialog id="feedback" class="feedback" aria-labelledby="feedback-title"
+        aria-describedby="feedback-lede">
+  <form action="{{ url_for('feedback') }}" method="post" data-feedback-form>
+    <h2 id="feedback-title">Share feedback</h2>
+    <div class="stack-tight" data-feedback-fields>
+      <p id="feedback-lede" class="muted">Help make Sweep better. Bug reports, suggestions and ideas are all welcome.</p>
+      <label>Your email <span aria-hidden="true">*</span>
+        <input type="email" name="email" required maxlength="254"
+               autocomplete="email" placeholder="you@example.com" autofocus></label>
+      <label>What is this about? <span aria-hidden="true">*</span>
+        <select name="type" required>
+          <option value="" selected disabled>Choose one</option>
+          <option value="bug">Bug</option>
+          <option value="search">Search results</option>
+          <option value="feature">Feature request</option>
+          <option value="ui">UI / usability</option>
+          <option value="other">Other</option>
+        </select></label>
+      <label>Subject
+        <input type="text" name="subject" maxlength="150" placeholder="Short summary"></label>
+      <label>Your feedback <span aria-hidden="true">*</span>
+        <textarea name="feedback" required minlength="10" maxlength="5000" rows="6"
+                  placeholder="Tell me what happened or what you'd like to see..."></textarea></label>
+      {# The honeypot. Off-screen and out of the tab order; a person never
+         fills it, a form bot fills everything. #}
+      <div class="feedback-hp" aria-hidden="true">
+        <label>Leave this empty <input type="text" name="website" tabindex="-1" autocomplete="off"></label>
+      </div>
+      <p class="error" role="alert" data-feedback-error hidden></p>
+      <div class="actions">
+        <button type="submit" class="primary" data-feedback-send>Send feedback</button>
+        <button type="button" class="secondary" data-feedback-close>Cancel</button>
+      </div>
+    </div>
+    <div class="stack-tight" data-feedback-done hidden>
+      <p class="lede" tabindex="-1" data-feedback-thanks>Thanks — feedback sent.</p>
+      <p class="muted">I read every message.</p>
+      <div class="actions">
+        <button type="button" class="secondary" data-feedback-close>Close</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+{# Plain script for the same reason as the run strip below: Alpine is
+   deferred behind the font stylesheet, and this is chrome, not a screen. #}
+<script>
+  (function () {
+    var dlg = document.getElementById("feedback"),
+        opener = document.querySelector("[data-feedback-open]");
+    if (!dlg || !opener || typeof dlg.showModal !== "function") return;
+    var form = dlg.querySelector("[data-feedback-form]"),
+        fields = dlg.querySelector("[data-feedback-fields]"),
+        done = dlg.querySelector("[data-feedback-done]"),
+        error = dlg.querySelector("[data-feedback-error]"),
+        send = dlg.querySelector("[data-feedback-send]"),
+        FAILED = "Couldn't send your feedback right now. Please try again.",
+        sending = false, downOutside = false;
+    opener.hidden = false;
+
+    opener.addEventListener("click", function () {
+      fields.hidden = false; done.hidden = true; error.hidden = true;
+      dlg.showModal();
+    });
+    dlg.querySelectorAll("[data-feedback-close]").forEach(function (b) {
+      b.addEventListener("click", function () { dlg.close(); });
+    });
+    /* The dialog has no padding of its own, so a click whose target is the
+       dialog itself landed on the backdrop. Pressed AND released there: a
+       text selection dragged out of the textarea must not close it. */
+    dlg.addEventListener("pointerdown", function (e) { downOutside = e.target === dlg; });
+    dlg.addEventListener("click", function (e) {
+      if (downOutside && e.target === dlg) dlg.close();
+    });
+    /* Closing never clears anything: what was typed is still there on reopen. */
+    dlg.addEventListener("close", function () { opener.focus(); });
+
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      if (sending) return;
+      sending = true; send.disabled = true; send.textContent = "Sending…";
+      error.hidden = true;
+      var data = Object.fromEntries(new FormData(form));
+      data.page = location.pathname;
+      fetch(form.action, {
+        method: "POST", credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(data)
+      })
+        .then(function (r) {
+          return r.json().catch(function () { return {}; }).then(function (b) {
+            if (!r.ok || !b.ok) throw { shown: b.error || FAILED };
+          });
+        })
+        .then(function () {
+          form.reset();
+          fields.hidden = true; done.hidden = false;
+          /* Focus the sentence, so a screen reader says it; Tab reaches Close. */
+          done.querySelector("[data-feedback-thanks]").focus();
+        })
+        /* Only our own copy is ever shown — a network error's text is not. */
+        .catch(function (x) {
+          error.textContent = (x && x.shown) || FAILED;
+          error.hidden = false;
+        })
+        .finally(function () {
+          sending = false; send.disabled = false; send.textContent = "Send feedback";
+        });
+    });
+  })();
+</script>
+{% endif %}
+
+{# Between the header and the page, so it is the first thing under the
+   journey on every screen and above whatever that screen is about. Not on
+   /running itself: the whole page is the sweep there, and a strip saying so
+   above it would be the same sentence twice. #}
+{% if active_run and not (active_run.kind == 'sweep' and step == 'running') %}
+  {% include "_active_run.html" %}
+{% endif %}
+
+<div{% block meter_scope %}{% endblock %}>
+  {% if not public_mode %}
+  {# over-cap red is for a sweep that outran its credit, so it is gated on
+     the figure actually BEING this sweep's spend — not on a month-to-date
+     total that merely happens to exceed the cap. #}
+  {# `zero` is a figure that is exactly nothing (a free sweep's estimate, a sweep that has spent nothing yet): not money, so
+     not amber (D7C). The moment there is money in it, it is. An unknown figure is neither. #}
+  <div class="meter {{ 'over' if spend and spend_is_this_sweep and cap_usd is not none and spend > cap_usd }}{{ ' zero' if spend is not none and not spend }}"{% block meter_class_bind %}{% endblock %}>
+    <div class="meter-head">
+      <span class="label">{% block meter_label %}Current spend{% endblock %}</span>
+      {# None means the figure genuinely is not known (no baseline to subtract,
+         or the account-usage call failed). It renders as that, never as
+         $0.00 — a fabricated zero on a money display is its own defect. #}
+      <span class="numeral{{ ' unknown' if spend is none }}"{% block meter_numeral_bind %}{% endblock %}>
+        {%- if spend is none %}not known{% else %}${{ '%.2f'|format(spend) }}{% endif -%}
+      </span>
+      <span class="meter-facts">{% block meter_facts %}{% endblock %}</span>
+    </div>
+    <div class="meter-track">
+      <div class="meter-fill" style="width: {{ fill_pct }}%"{% block meter_fill_bind %}{% endblock %}></div>
+      {% if cap_usd is not none %}<div class="meter-cap" style="left: 100%"></div>{% endif %}
+    </div>
+  </div>
+  {% endif %}
+
+  <a id="main-content"></a>
+  <main>{% block body %}{% endblock %}</main>
+  {#- `{%-` on both tags: the console renders not one byte of this, not even its line breaks (TheConsoleIsUntouched). #}
+  {%- if public_mode %}
+  {# A literal path, not url_for: /privacy is registered by public.harden(), and screens are also rendered with public_mode
+     on apps the tests build without it. #}
+  <footer class="site-foot"><a href="/privacy">How Sweep handles your data</a></footer>
+  {%- endif %}
+</div>
+{% block after_main %}{% endblock %}
+
+{% if active_run and not (active_run.kind == 'sweep' and step == 'running') %}
+{# Plain script, not Alpine: Alpine is deferred and a deferred script also
+   waits on the render-blocking font stylesheet, and the one thing this strip
+   must not do is take a slow network to tell someone their sweep is alive.
+   The server already painted the truth; this only follows it.
+
+   /activity is the one endpoint for the one strip — the résumé half and the
+   sweep half both — so there is never a second poll loop with a second
+   opinion. It answers the same function the page was rendered from, so a
+   poll can only replace the strip with a newer version of itself; nothing
+   about the phrasing is re-decided here. #}
+<script>
+  (function () {
+    var bar = document.getElementById("runbar");
+    if (!bar) return;
+    var head = bar.querySelector("[data-run-headline]"),
+        detail = bar.querySelector("[data-run-detail]"),
+        cta = bar.querySelector("[data-run-cta]"),
+        /* Slower than the running screen's 4s. Nobody on another page is
+           watching this the way they watch a progress bar, and the sweep is
+           minutes long. */
+        EVERY = 8000,
+        /* Nothing transitions out of these, so polling past one is asking a
+           question whose answer cannot change. */
+        /* Nothing transitions out of these, so polling past one is asking
+           a question whose answer cannot change. "ready" is terminal for the
+           résumé half in the same way "finished" is for the sweep — the next
+           thing that happens is the visitor starting a sweep, which is a
+           navigation, not a poll. */
+        DONE = { finished: 1, stopped: 1, failed: 1, ready: 1 };
+
+    var WHERE = { running: "running", results: "results",
+                  review: "review", upload: "upload" };
+
+    function paint(b) {
+      /* Nothing happening is an answer: the sweep was cleared, or the
+         profile was opened and "ready" stood down. */
+      if (!b) { bar.hidden = true; return true; }
+      bar.hidden = false;
+      bar.className = "runbar " + b.tone;
+      head.textContent = b.headline;
+      detail.textContent = b.detail;
+      cta.textContent = b.cta;
+      cta.href = bar.dataset[WHERE[b.to] || "running"];
+      return DONE[b.phase];
+    }
+
+    function tick() {
+      fetch(bar.dataset.poll, { credentials: "same-origin" })
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (p) {
+          /* A 409 (no sweep) or a run the worker no longer owns to us: leave
+             what the server rendered alone rather than blanking the strip on
+             one bad answer. */
+          if (!p) { setTimeout(tick, EVERY); return; }
+          if (!paint(p.banner)) setTimeout(tick, EVERY);
+        })
+        .catch(function () { setTimeout(tick, EVERY); });
+    }
+    if (!DONE[{{ active_run.phase|tojson }}]) setTimeout(tick, EVERY);
+  })();
+</script>
+{% endif %}

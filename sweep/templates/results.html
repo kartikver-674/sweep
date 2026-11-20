@@ -1,0 +1,757 @@
+{% extends "base.html" %}
+{% block title %}Results — Sweep{% endblock %}
+{% block meter_label %}Spent{% endblock %}
+{% block meter_facts %}{{ total }} of {{ all_total }} listings shown{% endblock %}
+
+{# Before the first paint, so it is in the head (base.html's {% block head %}). One class on <html>, removed again
+   500ms after the first frame, so nothing is hidden if this never runs and nothing can replay when the page's
+   own nodes are replaced later.
+
+     arrive  reached from another stage of the product (the Running screen, a step, a link), as a plain
+             navigation: the first rows write in (sweep.css, Motion)
+     swap    the previous page was this one AND it had dimmed the list while it waited (the script at the end
+             of the page), less than 10s ago: the new list starts at that level and settles, so the wait ends
+             with the cue it began with
+
+   A move between views that was answered quickly has neither: it is an instant swap. A typed address, a
+   bookmark, a reload and back/forward are not news either, and reduced motion gets no class at all. #}
+{% block head %}
+<script data-motion="arrive">
+(function () {
+  var d = document.documentElement;
+  try {
+    var dimmed = false;
+    try {
+      var t = +sessionStorage.getItem("sweep.dimmed");
+      dimmed = t > 0 && Date.now() - t < 10000;
+      sessionStorage.removeItem("sweep.dimmed");
+    } catch (e) {}
+    var r = document.referrer ? new URL(document.referrer) : null;
+    var from = r && r.origin === location.origin ? r.pathname : null;
+    var nav = window.performance && performance.getEntriesByType && performance.getEntriesByType("navigation")[0];
+    var cls = from === location.pathname ? (dimmed ? "swap" : "") : (from ? "arrive" : "");
+    if (cls && (!nav || nav.type === "navigate") && !matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      d.classList.add(cls);
+      /* from the first frame, not from head parse: a slow first paint must not cut the animation short */
+      requestAnimationFrame(function () { setTimeout(function () { d.classList.remove(cls); }, 500); });
+    }
+  } catch (e) { /* no motion: the page is simply there */ }
+})();
+</script>
+{% endblock %}
+
+{# One résumé reference, drawn from the engine's own sentence cut into
+   pieces (logic.recommendation_pieces): the name is set apart by the piece's
+   role, never by searching the sentence for it, and every piece is escaped
+   text. A résumé's name is the visitor's own words and may hold anything. #}
+{% macro said(parts) -%}
+  {#- A name and the one mark of punctuation that follows it (the full stop, comma or
+      closing bracket the engine's sentence puts there) are one unbreakable unit, so
+      that mark can never wrap onto a line of its own. The text is the same text: one
+      character is drawn inside the wrapper instead of after it. -#}
+  {%- set ns = namespace(skip=0) -%}
+  {%- for text, role in parts -%}
+    {%- if role -%}
+      {%- set nxt = loop.nextitem -%}
+      {%- set glue = nxt[0][:1] if (nxt and not nxt[1] and nxt[0][:1] in ['.', ',', ')']) else '' -%}
+      <span class="nb">
+        {%- if role == 'name' -%}<b class="rname">{{ text }}</b>
+        {%- elif role == 'peer' -%}<span class="rpeer">{{ text }}</span>
+        {%- else -%}<span class="rname2">{{ text }}</span>{%- endif -%}
+        {{- glue -}}</span>
+      {%- set ns.skip = glue|length -%}
+    {%- else -%}
+      {{- text[ns.skip:] -}}{%- set ns.skip = 0 -%}
+    {%- endif -%}
+  {%- endfor -%}
+{%- endmacro %}
+
+{% from "_a.html" import tip, stamp %}
+
+{# One table, used by every section. The sponsorship section wraps it in a
+   <details> and the others don't, which is the only difference between them —
+   not a reason to carry two copies of the row markup.
+
+   A ruled list, not cards: the job and what to do about it lead, the score is
+   a right-aligned figure, and at phone width the same DOM becomes one item
+   per job. Pay and Experience are columns only when some job in the list
+   states them, and on a phone an absent fact is not drawn at all.
+
+   Public mode draws the same table as one sticker card per job at every width (sweep-a.css, A9, under `.res-a`): the
+   markup, the cells and their order do not move. Two things are public-only: the matched skills sit behind a "Why it
+   matched" peek (every term, no cap), and `top` (the first card of the first section, on the best-match sort) carries a
+   "Top of the pile" stamp. `top` defaults to false, so the console's calls and bytes are what they were. #}
+{% macro listings_table(rows, heading, top=false) %}
+  <div class="listings">
+    <table class="jobs" aria-label="{{ heading }}">
+      <thead>
+      <tr>
+        {% if not public_mode %}<th scope="col" class="did"><span class="visually-hidden">Applied</span></th>{% endif %}
+        <th scope="col" class="m">{% if public_mode %}Match{% if view_label %}<span class="visually-hidden"> for {{ view_label }}</span>{% endif %}{% else %}Score{% endif %}</th>
+        <th scope="col">{% if has_recs %}Job and suggested résumé{% else %}Job{% endif %}</th>
+        <th scope="col" class="loc">Location</th>
+        {% if show_pay %}<th scope="col" class="pay">Pay</th>{% endif %}
+        {% if show_exp %}<th scope="col" class="exp">Experience</th>{% endif %}
+        <th scope="col" class="src">Source</th>
+        <th scope="col" class="skills">Matched skills</th>
+        <th scope="col" class="act"><span class="visually-hidden">Apply</span></th>
+      </tr>
+      </thead>
+      <tbody>
+      {% for row in rows %}
+        {# The apply link decides whether the whole row is clickable, so it is
+           resolved before the row opens. Same allowlist as the anchor below
+           and deliberately the SAME expression: autoescape stops attribute
+           breakout but not javascript:, and a second copy of that rule is how
+           one of the two paths ends up without it. A row with no safe link
+           carries no data-href and is not clickable. #}
+        {%- set href = (row['apply_url'] or '')|trim %}
+        {%- set linkable = (href|lower).startswith(('http://', 'https://')) %}
+        {# The row owns the applied state, so the step-down follows the tick with
+           no reload and the checkbox cannot disagree with the class it drives.
+           Bound ONLY — never also written into the static class, which Alpine
+           did not add and so would never remove on untick. #}
+        <tr x-data="{ done: {{ 'true' if row['applied'] else 'false' }} }"
+            :class="done && 'applied'"
+            {%- if linkable %} class="rowlink" data-href="{{ href }}"{% endif %}>
+          {# A row with no identity cannot be tracked — the ledger is keyed on
+             it, and one blank key would tick every other unkeyable row along
+             with it. Rare enough to leave the cell empty rather than explain. #}
+          {%- if not public_mode %}
+          <td class="did">
+            {# The applied tick writes a file beside this profile's own
+               results, which is the operator's disk and their bookkeeping.
+               A public visitor has neither, and POST /applied is not
+               reachable for them — so the control is not drawn (nor is its
+               column) rather than drawn and refused. #}
+            {%- if row['_key'] %}
+              {# The key travels in a data attribute, not interpolated into the
+                 JS below: a req-number or URL key is not normalized the way a
+                 company+title one is, and a quote in it would end the string
+                 literal it was pasted into. An attribute is escaped as markup,
+                 which is the one place this is safe to put. #}
+              <label class="tick">
+                <input type="checkbox" x-model="done"
+                       data-key="{{ row['_key'] }}"
+                       @change="fetch('{{ url_for('applied') }}', {
+                         method: 'POST',
+                         headers: {'Content-Type':
+                                   'application/x-www-form-urlencoded'},
+                         body: 'key=' + encodeURIComponent($el.dataset.key)
+                               + '&on=' + (done ? '1' : '0')
+                       }).then(r => { if (!r.ok) { done = !done } })
+                         .catch(() => { done = !done })"
+                       {{ 'checked' if row['applied'] }}>
+                <span class="visually-hidden">Applied to
+                  {{ row['title'] }} at {{ row['company'] }}</span>
+              </label>
+            {%- endif %}</td>
+          {%- endif %}
+          <td class="score"{% if public_mode %} title="Match score {{ row['score'] }}{% if row['_for'] %} for {{ row['_for'] }} — how much of that résumé this job asks for{% else %} — how much of your résumé this job asks for{% endif %}"{% endif %}>{{ row['score'] }}</td>
+          <td class="role">
+            {%- if public_mode and top and loop.first %}{{ stamp("Top of the pile") }}{% endif %}
+            <p class="job-line"><b>{{ row['title'] }}</b>
+              {%- if not public_mode %}<span class="state" x-show="done" x-cloak><span aria-hidden="true">&check;</span> Applied</span>{% endif %}<span class="co">{{ row['company'] }}</span></p>
+            {#- A Multi-Track row (P4-R2): which of the visitor's résumés the
+                engine suggests, in its own words — the caution, when there is
+                one, BEFORE the suggestion, so the suggestion is never read as
+                an endorsement it does not make. A qualification, not an
+                error: quiet, with a shape, never coral. #}
+            {%- if row['_pieces'] %}
+              {%- if row['_pieces'].caution %}
+            <p class="caution"><span class="bang" aria-hidden="true">!</span><span><b>Note:</b> {{ said(row['_pieces'].caution) }}</span></p>
+              {%- endif %}
+            <p class="suggest">
+              {%- for sentence in row['_pieces'].suggestion %}{% if not loop.first %} {% endif %}{{ said(sentence) }}{% endfor -%}
+            </p>
+            {%- endif %}
+          </td>
+          <td class="loc"{% if row['location'] and row['location']|short_places != row['location'] %} title="{{ row['location'] }}"{% endif %}>{{ row['location']|short_places }}</td>
+          {#- A column some job in this list fills, a dash (spoken as "Not
+              stated") where this job does not; on a phone, nothing. #}
+          {%- if show_pay %}
+          {%- set pay = (row['salary'] or '')|trim %}
+          <td class="pay{{ '' if pay else ' none' }}">{% if pay %}<span class="mlabel">Pay </span>{{ pay }}{% else %}<span aria-hidden="true">—</span><span class="visually-hidden">Not stated</span>{% endif %}</td>
+          {%- endif %}
+          {%- if show_exp %}
+          {%- set exp = (row['experience_required'] or '')|trim %}
+          <td class="exp{{ '' if exp else ' none' }}">{% if exp %}<span class="mlabel">Experience </span>{{ exp }}{% else %}<span aria-hidden="true">—</span><span class="visually-hidden">Not stated</span>{% endif %}</td>
+          {%- endif %}
+          {# Same rule plan.cost() and the running screen's tiles use: a site
+             listed at a $0.00 rate is free either way. Plain text: the source
+             says so in words (a paid board says "Paid"; a free one says so to a
+             screen reader), because a colour is not a fact. #}
+          {%- set free_src = rates.get(row['source_site'], 0.0) == 0.0 %}
+          <td class="src{{ ' free' if free_src }}"><span class="mlabel">via </span>{{ site_label(row['source_site']) }}
+            {%- if free_src %}<span class="visually-hidden">, free</span>
+            {%- else %}<span class="paid-word">Paid</span>{% endif %}</td>
+          {# Split into tags: the column is a comma-joined string, and at four
+             or five terms it reads as one run-on cell otherwise.
+
+             Capped, because a dozen of them wrap to three lines and make
+             every row three times as tall — on a screen whose job is letting
+             you compare listings by scanning down it. The rest are on the
+             hover, and the count says they exist. A phone shows the first
+             three (CSS) and its own count of the rest. #}
+          {%- set terms = (row['matched_skills'] or '').split(',')|map('trim')|select|list %}
+          {#- Public: one peek instead of the capped tags. The cap kept a table row short; a card has room, so EVERY
+              term is here, behind "Why it matched". `@click.stop` is what keeps a click inside the open peek from
+              reaching the row-click script below (which opens the listing on any click outside a link, button, field,
+              label or summary): the details is the one place on a card that is not the card's own click. No terms: the
+              cell is empty, as an empty skills cell has always been. #}
+          {%- if public_mode %}
+          <td class="skills">{% if terms %}<details class="why" @click.stop><summary>Why it matched</summary><div class="why-body"><span class="why-t">Your skills this job mentions</span>{% for s in terms %}<span class="tag">{{ s }}</span>{% endfor %}</div></details>{% endif %}</td>
+          {%- else %}
+          <td class="skills">{% for s in terms[:6] %}<span class="tag">{{ s }}</span>{% endfor %}
+            {%- if terms|length > 6 %}<span class="tag more d-only"
+              title="{{ terms[6:]|join(', ') }}">+{{ terms|length - 6 }}</span>{% endif %}
+            {%- if terms|length > 3 %}<span class="tag more m-only"
+              title="{{ terms[3:]|join(', ') }}">+{{ terms|length - 3 }}</span>{% endif %}</td>
+          {%- endif %}
+          <td class="act">
+            {%- if linkable %}
+              <a class="apply" href="{{ href }}" target="_blank" rel="noopener">Apply<span class="visually-hidden"> to {{ row['title'] }} at {{ row['company'] }}</span><span class="go" aria-hidden="true">→</span></a>
+            {%- else %}
+              <span class="muted">No link</span>
+            {%- endif %}
+            {# The screen offers "Newest first" and showed no date anywhere,
+               so the order it produced could not be checked from the page. #}
+            {%- set age = posted_age(row['date_posted']) %}
+            {%- if age %}<span class="posted">{{ age }}</span>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endmacro %}
+
+{# One link per format, carrying the current filter and sort so the file
+   matches the screen. Same omit-the-default pattern the re-rank action URL
+   uses, to keep /export.csv clean when nothing is filtered. #}
+{% macro export_link(fmt, label, kind) %}
+  <a class="{{ kind }}" href="{{ url_for('export', fmt=fmt,
+       min=min_arg, source=source or none, q=q or none,
+       sort=sort if sort != 'score' else none) }}">{{ label }}</a>
+{%- endmacro %}
+
+{# How big the section is, on the heading's own line; what it is, under it.
+   A long caption right-aligned beside a heading read as body copy fighting
+   the heading, so it is a quiet line of its own. #}
+{% macro section_count(held) %}
+  <span class="meta head-note"><b>{{ held }} listing{{ '' if held == 1 else 's' }}</b></span>
+{%- endmacro %}
+
+{# Only when there is something held back. "Show all" lifts the cap on every
+   section rather than this one: the intent behind the click is "stop hiding
+   things", and one flag beats a parameter per section. #}
+{% macro section_foot(shown, held) %}
+  {% if shown < held %}
+    <div class="section-foot">
+      <span class="meta">Showing the top {{ shown }} of {{ held }}</span>
+      <a href="{{ url_for('results', min=min_arg,
+           source=source or none, q=q or none,
+           sort=sort if sort != 'score' else none, full=1, track=view_track) }}">Show
+        all {{ held }}</a>
+    </div>
+  {% elif full and held > section_cap %}
+    <div class="section-foot">
+      <span class="meta">Showing all {{ held }}</span>
+      <a href="{{ url_for('results', min=min_arg,
+           source=source or none, q=q or none,
+           sort=sort if sort != 'score' else none, track=view_track) }}">Back to the top
+        {{ section_cap }}</a>
+    </div>
+  {% endif %}
+{%- endmacro %}
+
+{% from "_weights.html" import weight_editor %}
+{% block body %}
+<div class="stack{% if public_mode %} res-a{% endif %}">
+  <div class="stack-tight">
+    {# One text node per phrase: HTML collapses a newline inside a heading,
+       but a sentence broken across template lines is one nobody can grep
+       for — including the tests that assert what the screen says. #}
+    {%- if public_mode %}<span class="eyebrow">Step 4 · your jobs</span>{% endif %}
+    <h1>{% if public_mode %}
+      {%- if total == all_total and ending and ending.jobs %}{{ total }} job{{ '' if total == 1 else 's' }} {{ ending.jobs }}
+      {%- elif total == all_total and view_track %}{{ total }} job{{ '' if total == 1 else 's' }} evaluated for {{ view_label }}
+      {%- elif total == all_total %}{{ total }} job{{ '' if total == 1 else 's' }} found
+      {%- else %}{{ total }} of {{ all_total }} jobs shown{% endif %}
+    {%- else %}
+      {%- if total == all_total and ending and ending.jobs %}{{ total }} listing{{ '' if total == 1 else 's' }} {{ ending.jobs }}
+      {%- elif total == all_total %}{{ total }} listings kept{% else %}{{ total }} of {{ all_total }} listings{% endif %}
+    {%- endif %}</h1>
+    {# Public: no lede. "Sorted by Best match" on the tools line below says the
+       order, and says the real one when it is not best match. The console
+       keeps its own line about what filtering costs. #}
+    {%- if not public_mode %}
+    <p class="lede">
+      {%- if free_only %}This sweep cost nothing, and filtering these costs nothing either.
+      {%- else %}Filtering and re-ranking these is free and costs no extra credit.{% endif %}</p>
+    {%- endif %}
+    {# What the figure is, behind one door: said once, in a sentence, where the
+       first-time reader wants it and the tenth does not need it. Nothing to
+       explain on a page with no jobs. #}
+    {%- if public_mode and not run_empty %}
+    <details class="notes how-scoring">
+      <summary>How match scores work</summary>
+      <p class="muted">
+        {%- if views %}Match score is how much of a résumé — its skills and experience — a job actually asks for: in All Jobs, of the résumé suggested first; in one résumé's view, of that résumé.
+        {%- else %}Match score is how much of your résumé — skills and experience — a job actually asks for, so a higher score means more of what you have.{% endif %}
+        It is a raw score, not a percentage, and it can be negative.</p>
+      {#- The same sentence as a picture: a line with zero marked on it. No numbers, bands or thresholds, because the
+          engine publishes none: a score has no scale, only a sign and an order. The words are the picture's own. #}
+      <div class="scale" aria-hidden="true"><span class="scale-l">below zero</span><span class="scale-line"><i class="scale-zero"></i></span><span class="scale-r">more of your résumé</span></div>
+    </details>
+    {%- endif %}
+  </div>
+
+  {# A run that did not end whole says so here, in the Running screen's own
+     banner and words: the jobs are real, and the page must not read as a
+     finished search when it was not one. Nothing when the run finished. #}
+  {% if ending %}
+    <div class="banner {{ ending.tone }}" role="note">
+      <div><b>{{ ending.headline }}</b> <span>{{ ending.detail }}</span></div>
+    </div>
+  {% endif %}
+
+  {# The old copy told the user to go and run merge_jobs.py, and told them
+     so whenever this screen was showing an unmerged file — including when
+     there was only one sweep on disk and nothing to fold in. #}
+  {% if merging %}
+    <p class="panel muted">Merging now. Reload in a moment — the shortlist
+      below is still the most recent sweep on its own.</p>
+  {% elif public_mode %}
+    {# Local mode says which FILE this is, which is bookkeeping about a disk
+       the visitor does not have. Publicly there is exactly one sweep and
+       nothing to disambiguate. #}
+  {% elif not merged and not earlier %}
+    {# Which file this is, said even when every row is filtered out — that is
+       exactly when a user needs to know what was read. #}
+    <p class="muted">Showing your most recent sweep only. It is the only one on
+      disk for this profile.</p>
+  {% elif not merged %}
+    <div class="panel">
+      <div class="panel-head">
+        <h2>{{ earlier }} earlier sweep{{ '' if earlier == 1 else 's' }} on disk</h2>
+        {% if earlier_dates %}
+          <span class="meta">{{ earlier_dates|join(', ') }}</span>
+        {% endif %}
+      </div>
+      <p class="muted">Showing your most recent sweep only. Merging folds them
+        all into one shortlist and drops the duplicates, keeping the
+        highest-scoring copy of each posting. It reads files you already have —
+        nothing is scraped and nothing is charged.</p>
+      {# Both true and load-bearing: this is why a merged list can be SMALLER
+         than the sum of its parts, and it is the one thing a user would
+         otherwise discover as missing rows. #}
+      <p class="muted">The merge re-applies your current filters — age,
+        reachability, excluded titles — to the older rows, so anything those
+        rules now reject drops out. It also replaces the file a re-rank
+        writes, so run it before re-ranking rather than after.</p>
+      <form method="post" action="{{ url_for('merge') }}"
+            x-data="{ sent: false }" @submit="sent = true">
+        <div class="actions">
+          <button class="secondary" type="submit" :disabled="sent">Merge them
+            in</button>
+          <span class="meta sending" x-show="sent" x-cloak>Starting the
+            merge…</span>
+        </div>
+      </form>
+    </div>
+  {% endif %}
+
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  {% if notice %}<p class="muted{% if public_mode %} notice{% endif %}">{{ notice }}</p>{% endif %}
+
+  {% if rescoring and not notice %}
+    <p class="panel muted">Re-ranking now. Reload in a moment to see the new
+      ranking — the shortlist below is still the old one.</p>
+  {% endif %}
+  {#- A Multi-Track run's views (P4-R2): links, so a reload keeps the view and
+      the URL carries an id, never a label. Tabs, not buttons: the current one
+      is marked for assistive technology (aria-current) and by its weight and
+      underline, not by colour alone. Each is the résumé's own editable name;
+      the file it came from is its hover and the line under the tabs. #}
+  {%- if views and not run_empty %}
+  <nav class="views" aria-label="Which jobs to show">
+    {%- for v in views %}
+    <a{% if v.current %} aria-current="page"{% endif %}
+       {%- if v.file %} title="From {{ v.file }}"{% endif %}
+       href="{{ url_for('results', track=v.id, min=min_arg, source=source or none,
+                q=q or none, sort=sort if sort != 'score' else none) }}"><span class="vname">{{ v.label }}</span> <span class="n">({{ v.count }})</span>{% if v.current %}<span class="visually-hidden"> — showing</span>{% endif %}</a>
+    {%- endfor %}
+  </nav>
+  <p class="meta view-note">
+    {%- if view_track %}Jobs Sweep evaluated for <b>{{ view_label }}</b>
+      {%- if view_file %} <span class="file">(from {{ view_file }})</span>{% endif %}, ranked by that résumé's own match score. Exports always hold All Jobs.
+    {%- elif has_recs %}Every job once, with the résumé Sweep suggests for it.
+    {%- else %}Every job once.{% endif %}</p>
+  {%- endif %}
+
+  {# One line of tools. Two buttons, not two disclosures that each move when
+     opened: the line never changes, and what a button opens appears under it.
+     Filter and sort is open when a filter or sort is applied, so the state that
+     produced the list is never hidden from it. Export is a door of its own, NOT
+     inside the filters: it is the thing a reader who has found their jobs
+     reaches for, and it was four links buried in a form. Nothing to filter or
+     export on a page with no jobs. #}
+  {%- if not run_empty %}
+  {%- set filtered = min_score or source or q %}
+  {%- set filter_open = filtered or sort != 'score' %}
+  <div class="bar" x-data='{ tool: {{ ("filter" if filter_open else "")|tojson }} }'>
+    <p class="count">Sorted by {{ sorts[sort][0] }}
+      {%- if filtered and total %} · filters applied <a class="tertiary" href="{{ url_for('results', track=view_track) }}">Clear</a>{% endif %}</p>
+    <button type="button" class="secondary tool-toggle" aria-controls="tool-filter"
+            aria-expanded="{{ 'true' if filter_open else 'false' }}"
+            :aria-expanded="tool === 'filter'" @click="tool = tool === 'filter' ? '' : 'filter'">Filter and sort</button>
+    {%- if export_total %}
+    <button type="button" class="secondary tool-toggle" aria-controls="tool-export" aria-expanded="false"
+            :aria-expanded="tool === 'export'" @click="tool = tool === 'export' ? '' : 'export'">Export…</button>
+    {%- endif %}
+
+    <div class="tool-panel" id="tool-filter" x-show="tool === 'filter'"{% if not filter_open %} style="display:none"{% endif %}
+         x-transition:enter="t-in" x-transition:enter-start="t-from" x-transition:enter-end="t-to"
+         x-transition:leave="t-out" x-transition:leave-start="t-to" x-transition:leave-end="t-from">
+      <form method="get">
+        <div class="row">{% if view_track %}<input type="hidden" name="track" value="{{ view_track }}">{% endif %}
+          <label><span class="label">Minimum score</span>
+            <input type="number" name="min" value="{{ '' if min_score is none else min_score }}"></label>
+          <label><span class="label">Source</span>
+            <select name="source">
+              <option value="">All sources</option>
+              {# The VALUE stays the engine's key, which is what the filter
+                 compares; only the text is the board's own spelling. #}
+              {% for s in sources %}
+                <option value="{{ s }}" {{ 'selected' if s == source }}>{{ site_label(s) }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label><span class="label">Title or company</span>
+            <input type="text" name="q" value="{{ q }}"></label>
+          {# Same form as the filters, so one submit applies both — and the
+             selected order survives the round trip rather than snapping back to
+             best-match every time a filter changes. #}
+          <label><span class="label">Sort by</span>
+            <select name="sort">
+              {% for key, (label, _) in sorts.items() %}
+                <option value="{{ key }}" {{ 'selected' if key == sort }}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+        </div>
+        <button class="secondary" type="submit">{% if public_mode %}Apply filters{%
+          else %}Update the list{% endif %}</button>
+      </form>
+    </div>
+
+    {# The exports carry the filters that are APPLIED, not what the fields
+       above happen to say — they are links, and the query string is the
+       applied state. Naming the count on the label is what keeps that
+       honest: "Export 128 listings" beside a filter you have typed but not
+       submitted still describes the file you will get. All four formats look
+       alike: none is the one you are meant to want. #}
+    {% if export_total %}
+    <div class="tool-panel" id="tool-export" x-show="tool === 'export'" style="display:none"
+         x-transition:enter="t-in" x-transition:enter-start="t-from" x-transition:enter-end="t-to"
+         x-transition:leave="t-out" x-transition:leave-start="t-to" x-transition:leave-end="t-from">
+      <div class="exports">
+        {# One text node: "Export 128 listings" is the label AND the
+           statement of what the file will hold, so it must not be broken
+           up by the template's own line wrapping. #}
+        <span class="label">Export {% if views %}All Jobs: {% endif %}{{ export_total }} listing{{ '' if export_total == 1 else 's' }}</span>
+        {{ export_link('xlsx', 'Excel', 'secondary') }}
+        {{ export_link('csv', 'CSV', 'secondary') }}
+        {{ export_link('json', 'JSON', 'secondary') }}
+        {# A page rather than a spreadsheet: the same listings, grouped as
+           they are here, in one file that opens in any browser years from
+           now with no network and no app. #}
+        {{ export_link('html', 'Web page', 'secondary') }}
+      </div>
+      <p class="meta">{% if public_mode %}Built from the jobs already
+        found in this sweep. No new searches, and nothing is charged.{% else
+        %}Reads the shortlist already on your disk and writes the file here.
+        No API calls, no credit, nothing uploaded.{% endif %}</p>
+    </div>
+    {% endif %}
+  </div>
+  {%- endif %}
+
+  {% if public_mode %}
+    {# POST /rescore is operator-only (public.OPERATOR_ONLY), so neither the
+       editor nor the explanation of it belongs on a public results screen:
+       one posts to a 404, the other describes a control that is not there. #}
+  {% elif free_only %}
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Re-ranking needs a paid sweep</h2>
+      </div>
+      <p class="muted">Re-ranking re-reads the job data an Apify actor already
+        returned and scores it again with your current weights — which costs
+        nothing, but there is nothing to re-read here: this sweep ran the free
+        sources, and those are not Apify runs. Running it anyway would pull in
+        whatever paid searches are on your keys, from any profile, and write
+        them over this shortlist.</p>
+    </div>
+  {% else %}
+    <details class="panel">
+      <summary>
+        <h2>Change the weights and re-rank</h2>
+        {% if derived and derived.skill_weights %}
+          <span class="meta">{{ derived.skill_weights|length }} skills</span>
+        {% endif %}
+      </summary>
+      <p class="muted">Re-reads the job data your Apify runs already returned
+        and scores it again — with whatever these weights say when you press
+        the button. Reading data you have already paid for costs nothing: no
+        actor runs, no new charges.</p>
+      {# The editor and the control that applies it, side by side where there
+         is room: .weights is capped at 34rem on purpose (the two controls
+         drift to opposite edges of a wide table), which left the other half
+         of this full-width panel empty. #}
+      <form class="rerank" method="post" x-data="{ sent: false }" @submit="sent = true"
+            action="{{ url_for('rescore', min=min_score or none, source=source or none, q=q or none, sort=sort if sort != 'score' else none) }}">
+        <div>
+          {# The same editor as the review screen, from the same macro. The
+             panel used to say "against your current weights" while offering
+             no way to see or change them — the weights were two screens back
+             and unreachable from here. #}
+          {% if derived and derived.skill_weights %}
+            {{ weight_editor(derived.skill_weights) }}
+            <p class="muted">A higher weight means a listing naming that skill
+              scores higher. Remove a term to take it out of the scoring
+              entirely.</p>
+          {% else %}
+            {# state["derived"] is gone after a restart, and the weights are
+               only recoverable from the profile file — which this cannot edit
+               without re-deriving. Say so rather than render an editor that
+               would post nothing. #}
+            <p class="muted">The weights for this session are not in memory
+              any more, so this will re-rank against whatever
+              <code>profiles/{{ profile }}.py</code> already holds. Re-read a
+              résumé to edit them.</p>
+          {% endif %}
+        </div>
+        <div class="inset stack-tight">
+          <label><span class="label">Hours to look back</span>
+            <input type="number" name="hours" value="6" min="1" max="168"></label>
+          <p class="meta">How far back through your Apify runs to read.</p>
+          <div class="actions">
+            <button class="secondary" type="submit" :disabled="sent">Re-rank</button>
+            <span class="meta sending" x-show="sent" x-cloak>Starting the re-rank…</span>
+          </div>
+          {% if derived and derived.skill_weights %}
+            <p class="meta">Re-ranking writes these weights to
+              <code>profiles/{{ profile }}.py</code>, so the next sweep uses
+              them too.</p>
+          {% endif %}
+        </div>
+      </form>
+      <p class="muted">It covers every search run on any Apify key in your
+        .env, for the sites you have configured, within the window above — not
+        only this sweep's runs, so on a key you share it can pull in another
+        profile's searches. The shortlist is rewritten in place, not added
+        to.</p>
+    </details>
+  {% endif %}
+
+  {% if total == 0 %}
+    <div class="no-results">
+      <h2>{% if public_mode %}No jobs to show{% else %}0 listings match{% endif %}</h2>
+      {% if view_track and not all_total %}<p>No evaluated jobs for this résumé in this Sweep.</p>
+        <div class="actions"><a class="secondary" href="{{ url_for('results') }}">Show All Jobs</a></div>
+      {% elif worst %}
+        <p>The {{ worst[0] }} filter removed the most —
+          {{ worst[1] }} of {{ all_total }}. Loosen it to see more.</p>
+        <div class="actions">
+        {% if worst[0] == 'minimum score' %}
+          <a class="secondary" href="{{ url_for('results', source=source or none, q=q or none, track=view_track) }}">Clear the minimum score</a>
+        {% elif worst[0] == 'source' %}
+          <a class="secondary" href="{{ url_for('results', min=min_arg, q=q or none, track=view_track) }}">Clear the source filter</a>
+        {% else %}
+          <a class="secondary" href="{{ url_for('results', min=min_arg, source=source or none, track=view_track) }}">Clear the search text</a>
+        {% endif %}
+          <a class="secondary" href="{{ url_for('results', track=view_track) }}">Clear every filter</a>
+        </div>
+      {% elif public_mode %}
+        {# No filters are applied, so there is nothing to clear: this sweep
+           genuinely found nothing. The two things that actually widen a
+           search are where you can work and which job titles to look for. #}
+        <p>This sweep didn't find any jobs matching your profile. That usually
+          means the search was too narrow.</p>
+        <div class="actions">
+          <a class="primary" href="{{ url_for('configure') }}">Widen the
+            search</a>
+          <a class="secondary" href="{{ url_for('review') }}">Change my job
+            titles</a>
+        </div>
+      {% else %}
+        <p>Nothing was found for this profile yet.</p>
+        {% if min_score or source or q %}<a class="secondary" href="{{ url_for('results') }}">Clear every filter</a>{% endif %}
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {# The sections in one region, so a slow answer can dim the list and leave the heading, the tabs and the tools
+     alone, and the first section can be named for the arrival. `stack` is what kept the 32px between sections
+     when they were direct children of the screen's own .stack: a plain wrapper lost it. Not drawn when there is
+     nothing to hold: an empty flex child still adds a gap. #}
+  {% if buckets.values()|select|list %}
+  {#- Public only: which section holds "Top of the pile" (the first one with jobs that is not the collapsed abroad one),
+      and whether any job SHOWN has skills to open (the tip is about "Why it matched", so it waits for one). Written with
+      whitespace control throughout so that the console, which skips all of it, renders the bytes it always did. #}
+  {%- if public_mode %}
+    {%- set ns = namespace(top='', skills=false) %}
+    {%- for k, _h, _n in sections %}
+      {%- if buckets[k] %}
+        {%- if k != 'abroad' and not ns.top %}{% set ns.top = k %}{% endif %}
+        {%- for r in (buckets[k] if full else buckets[k][:section_cap]) %}
+          {%- if (r['matched_skills'] or '').split(',')|map('trim')|select|list %}{% set ns.skills = true %}{% endif %}
+        {%- endfor %}
+      {%- endif %}
+    {%- endfor %}
+    {%- if ns.skills %}{{ tip("results-why", "Open “Why it matched” to see which of your skills a job mentions.") }}{% endif %}
+  {%- endif %}
+  <div id="results-body" class="stack results-body">
+  {% for key, heading, note in sections %}
+    {% if buckets[key] %}
+      {%- set held = buckets[key] %}
+      {%- set shown = held if full else held[:section_cap] %}
+      {% if key == 'abroad' %}
+        {# Collapsed by default: these need a visa, so they are the least
+           actionable rows on the screen. Otherwise identical to the sections
+           above it. #}
+        <details class="jobs-section">
+          <summary>
+            <h2>{{ heading }}</h2>
+            {{ section_count(held|length) }}
+          </summary>
+          <p class="meta section-note">{{ note }}</p>
+          {{ listings_table(shown, heading) }}
+          {{ section_foot(shown|length, held|length) }}
+        </details>
+      {% else %}
+        <section class="jobs-section">
+          <div class="section-head">
+            <h2>{{ heading }}</h2>
+            {{ section_count(held|length) }}
+          </div>
+          <p class="meta section-note">{{ note }}</p>
+          {{ listings_table(shown, heading, public_mode and sort == 'score' and key == ns.top) }}
+          {{ section_foot(shown|length, held|length) }}
+        </section>
+      {% endif %}
+    {% endif %}
+  {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
+{# A slow answer. A tab, "Show all", "Clear", a filter or a sort is an ordinary link or a GET form, so the page
+   navigates; this only says "still waiting" if the answer is slow. It never prevents, delays or replaces the
+   navigation, moves focus or scrolls. Armed on a same-page link's click and on a GET form's `submit`, which a
+   browser fires only after its own validation passes, so a number field that refuses its input cannot leave the
+   list dimmed; marked after 160ms, so a quick answer has no cue at all; and given up after 10s, so a navigation
+   stopped with Esc or lost to the network cannot leave it dimmed either. Exports, Apply, downloads, fragments,
+   other pages and other sites never arm it. A page restored from the back/forward cache keeps no class. The
+   flag it leaves in sessionStorage is what the next page's head script reads. #}
+<script data-motion="pending">
+(function () {
+  var d = document.documentElement, on = null, off = null, WAIT = 160, GIVE_UP = 10000;
+  function idle() {
+    clearTimeout(on); clearTimeout(off);
+    d.classList.remove("pending");
+    try { sessionStorage.removeItem("sweep.dimmed"); } catch (e) {}
+  }
+  function mark() {
+    d.classList.add("pending");
+    try { sessionStorage.setItem("sweep.dimmed", String(Date.now())); } catch (e) {}
+  }
+  function start() {
+    clearTimeout(on); clearTimeout(off);
+    /* a second press while it is dimmed is the same wait, not a blink: stay dimmed, restart the give-up clock */
+    if (d.classList.contains("pending")) mark(); else on = setTimeout(mark, WAIT);
+    off = setTimeout(idle, GIVE_UP);
+  }
+  function here(url) {
+    try { var u = new URL(url, location.href); return u.origin === location.origin && u.pathname === location.pathname; }
+    catch (e) { return false; }
+  }
+  document.addEventListener("click", function (e) {
+    var a = e.target.closest && e.target.closest("a[href]");
+    if (!a || e.defaultPrevented || e.button || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    if (a.target === "_blank" || a.hasAttribute("download") || a.hasAttribute("aria-current") ||
+        a.getAttribute("href").charAt(0) === "#" || !here(a.href)) return;
+    start();
+  });
+  document.addEventListener("submit", function (e) {
+    var f = e.target;
+    if (e.defaultPrevented || (f.method || "get").toLowerCase() !== "get" || !here(f.action || location.href)) return;
+    start();
+  });
+  addEventListener("pageshow", function (e) { if (e.persisted) idle(); });
+})();
+</script>
+
+{# Opening a listing is the whole point of this screen, and the target was a
+   single word at the far right of a very wide row. The Apply link stays: it
+   is the keyboard and screen-reader path, and the row is a mouse convenience
+   on top of it — which is why the row gets no tabindex or role, rather than
+   adding a duplicate tab stop to every row on the page. #}
+<script>
+  /* Which listings THIS browser has already opened. Kept here rather than on
+     the server: it is a fact about one person's browsing, the sweep state
+     does not survive a restart, and the shortlist itself is a CSV. Every
+     access is wrapped — localStorage throws outright in some privacy modes,
+     and a shortlist that will not render is a far worse outcome than one
+     that forgets which rows you clicked. */
+  var OPENED = "sweep.opened", OPENED_CAP = 2000;
+
+  function openedList() {
+    try { return JSON.parse(localStorage.getItem(OPENED)) || []; }
+    catch (e) { return []; }
+  }
+
+  function markOpened(row) {
+    if (!row || row.classList.contains("opened")) return;
+    row.classList.add("opened");
+    var seen = openedList();
+    if (seen.indexOf(row.dataset.href) !== -1) return;
+    seen.push(row.dataset.href);
+    /* Newest kept: an unbounded list would grow for as long as the profile
+       is used, and the oldest entries are the ones least likely to still be
+       on a shortlist. */
+    try {
+      localStorage.setItem(OPENED,
+        JSON.stringify(seen.slice(-OPENED_CAP)));
+    } catch (e) { /* full, or blocked: the class still applies this visit */ }
+  }
+
+  (function () {
+    var seen = openedList();
+    if (!seen.length) return;
+    var byHref = Object.create(null);
+    for (var i = 0; i < seen.length; i++) { byHref[seen[i]] = true; }
+    document.querySelectorAll("tr[data-href]").forEach(function (row) {
+      if (byHref[row.dataset.href]) row.classList.add("opened");
+    });
+  })();
+
+  document.addEventListener("click", function (e) {
+    var row = e.target.closest && e.target.closest("tr[data-href]");
+    if (!row) return;
+    /* Selecting a company name to copy it must not navigate — or count as
+       having opened the listing. */
+    if (String(window.getSelection() || "")) return;
+    /* The anchor handles itself — without this the row opens a second tab.
+       It is still an open, so it is still marked. */
+    if (e.target.closest("a, button, input, label, summary")) {
+      markOpened(row);
+      return;
+    }
+    markOpened(row);
+    window.open(row.dataset.href, "_blank", "noopener");
+  });
+</script>
+{% endblock %}

@@ -1,0 +1,452 @@
+{% extends "base.html" %}
+{% from "_weights.html" import weight_editor %}
+{% from "_resumes.html" import banner, card, cta, deck, open_card %}
+{% from "_a.html" import peek, tip %}
+{% block title %}{% if public_mode %}Your profile{% else %}Review what it read{% endif %} — Sweep{% endblock %}
+{#- The deck's page change fades (deck.css): only between deck pages, so only here. #}
+{% block head %}{% if public_mode and resumes and (track or not resumes.blocker) %}<link rel="stylesheet" href="{{ url_for('static', filename='deck.css') }}">{% endif %}{% endblock %}
+{% block body %}
+<div class="stack"{% if resumes %} data-resumes data-reading="{{ 1 if resumes.reading else 0 }}"
+     data-review="{{ url_for('review') }}" data-derive="{{ url_for('derive_post') }}"{% endif %}>
+  {# The screen answers one question — did Sweep understand me? — and it used
+     to answer it in the narrow left column while two thirds of the width went
+     to a 1-to-5 scoring table under two callouts explaining it. The summary is
+     the subject now; the scoring is a disclosure.
+
+     LOCAL mode keeps the old two-column layout: the operator reviews weights
+     on every run, that table is their working surface, and burying it behind
+     a click would cost them a click every single time. #}
+  {#- Two or three résumés: one page for all of them (_resumes.html), with
+     a banner in place of this header and at most one card open for editing
+     — the profile form below. #}
+  {%- if resumes %}
+  {{ banner(resumes, 'Step 2 · profile check' if public_mode else '') }}
+  {%- else %}
+  <div class="stack-tight">
+    {% if public_mode %}
+      <span class="eyebrow">Step 2 · profile check</span>
+      <h1>Did we get you <span class="scrib">right</span>?</h1>
+      <p class="lede">Read from
+        {%- if resume_name %} <b class="filename">{{ resume_name }}</b>
+        {%- else %} your résumé{% endif %}. Tap anything that looks off.</p>
+    {% else %}
+      <h1>Review what it read</h1>
+      <p class="lede">Sweep read your search titles and scoring terms
+        {%- if resume_name %} from <b class="filename">{{ resume_name }}</b>{% endif %}.
+        Correct bad guesses before spending anything.</p>
+    {% endif %}
+  </div>
+  {%- endif %}
+
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  {#- The résumé setup (P4-U1): which of the visitor's résumés this is. #}
+  {%- if track and not resumes %}
+  <p class="meta">Résumé {{ track.n }} of {{ tracks|length }}:
+    <b>{{ track.label }}</b> · <a href="{{ url_for('upload') }}">All your résumés</a></p>
+  {%- endif %}
+  {#- Another résumé in the search still to read or review: saving this one
+     goes on (POST /review) — to the next one read, if there is one — and the
+     button says which. #}
+  {%- if track %}
+  {%- set next_up = tracks|selectattr("selected")|rejectattr("status", "equalto", "ready")
+                    |rejectattr("id", "equalto", track.id)|list %}
+  {%- set next_ready = next_up|selectattr("status", "equalto", "review")|list %}
+  {%- endif %}
+  {#- The cards, and the open one's frame. With one open (the deck, _resumes.html) every other card goes in the deck beside it,
+     before the open one in the page. With none open and every résumé in the search reviewed (no blocker), the deck stays:
+     its sheets are all done, and the way on sits where the open card was, so the last "Leave this résumé out" lands on the
+     same page shape it left. Otherwise (reading, a failure, none included) they are the ledger. #}
+  {%- if resumes %}
+  {%- set deck_done = public_mode and not track and not resumes.blocker %}
+  <div class="ledger{{ ' deck-on' if track or deck_done }}">
+  {%- set opened = resumes.cards|map(attribute="open")|list %}
+  {%- set cut = opened.index(true) if true in opened else opened|length %}
+  {%- if track %}
+  {{ deck(resumes.cards, cut, experience_text(derived) if derived and not derived.experience_unverified else '') }}
+  {{ open_card(resumes.cards[cut]) }}
+  {%- elif deck_done %}
+  {{ deck(resumes.cards, cut, '') }}
+  <div class="deck-done">
+    {{ cta(resumes) }}
+  </div>
+  {%- else %}
+  {%- for c in resumes.cards[:cut] %}
+  {{ card(c) }}
+  {%- endfor %}
+  {%- endif %}
+  {%- endif %}
+
+  {% if not resumes or track %}<form method="post" action="{{ url_for('review', track=track_id) }}" class="stack{{ ' review-form' if public_mode }}"
+        x-data="{ sent: false }" @submit="sent = true" data-editor{% if next_ready and public_mode %} data-going="shuffle"{% endif %}>
+
+    {% if public_mode %}
+      {# ---- Summary first ------------------------------------------------
+         Three findings, in the order someone checks themselves: who I am,
+         what I'll be searched for, what I'm good at. Ruled rows, not three
+         boxes: the name of each on the left, the answer beside it. Locations
+         are deliberately NOT here — where you want to work describes this
+         search, not you, and it belongs with the other search preferences.
+
+         A5: nothing is behind a door any more. The years are a chip that opens
+         their editor, the skills are chips that open theirs (tap one to tune
+         it), and the explanations that sat above the old weight table are two
+         peeks under the skills. Every field is the same field it was, in this
+         same form, so the POST is unchanged. Without JavaScript everything is
+         open and it is the plain form it was (theme.js sets <html class="js">;
+         sweep-a.css hides a closed reveal only under it). #}
+      {% set whole, extra = experience_parts(derived) %}
+      {# The three findings are sections of the page: h2 under the page's h1 when this is the whole page, h3 when the form sits
+         inside a résumé card (that card's own h2 is the section, _resumes.html). `read-h` is their one look either way. #}
+      {% set rh = 'h3' if resumes else 'h2' %}
+      <div class="read">
+        <div class="read-block">
+          <div class="read-name"><{{ rh }} class="read-h">You</{{ rh }}></div>
+          {#- experience_unverified: the reader could not check the work history against the document, so the years are a
+             floor (often zero). The editor opens on its own and says so, and saving this page clears it (with_experience). #}
+          {% set unverified = derived.experience_unverified %}
+          <div class="read-answer" x-data="{ open: {{ 'true' if unverified else 'false' }} }">
+            <p class="read-lead">{{ derived.field_summary }}</p>
+            {% set said = experience_text(derived) %}
+            {% if said and whole is not none %}
+              <button type="button" class="xp-chip" aria-controls="xp-edit"
+                      @click="open = !open" :aria-expanded="open ? 'true' : 'false'">{{ 'Set your years of experience' if unverified else said ~ ' of experience' }}
+                <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M11 2.5 13.5 5 6 12.5H3.5V10z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg></button>
+            {% elif said %}
+              <p class="muted">{{ said }} of experience</p>
+            {% endif %}
+            {% if whole is not none %}
+              <div class="xp-edit{{ ' open' if unverified }}" id="xp-edit" :class="{ open: open }">
+                <div class="read-out">
+                  {%- if unverified %}
+                  <p class="xp-check"><b>Sweep couldn't check the dates in your work history,</b> so it did not count your
+                    experience. Set it here; it decides which jobs are too senior to show you.</p>
+                  {%- endif %}
+                  {# The group holds two controls, and each carries its own unit
+                     below — so the heading names the fact, not one of them. #}
+                  <span class="field-title" id="exp-label">Experience</span>
+                  <div class="row">
+                    <label class="narrow"><span class="label">Years</span>
+                      <div class="stepper" x-data='{ n: {{ whole|tojson }} }'>
+                        <button type="button" @click="n = Math.max(0, n - 1)"
+                                aria-label="One year less">&minus;</button>
+                        <input type="number" name="experience_years" min="0" max="60"
+                               value="{{ whole }}" x-model.number="n"
+                               aria-label="Years of experience"
+                               aria-describedby="exp-why">
+                        <button type="button" @click="n = Math.min(60, n + 1)"
+                                aria-label="One year more">+</button>
+                      </div>
+                    </label>
+                    <label class="narrow"><span class="label">Months</span>
+                      {# Capped at 11, not 12: a twelfth month is a year, and the
+                         two boxes would then disagree about the same number. #}
+                      <div class="stepper" x-data='{ n: {{ extra|tojson }} }'>
+                        <button type="button" @click="n = Math.max(0, n - 1)"
+                                aria-label="One month less">&minus;</button>
+                        <input type="number" name="experience_months" min="0" max="11"
+                               value="{{ extra }}" x-model.number="n"
+                               aria-label="Months of experience"
+                               aria-describedby="exp-why">
+                        <button type="button" @click="n = Math.min(11, n + 1)"
+                                aria-label="One month more">+</button>
+                      </div>
+                    </label>
+                  </div>
+                  <p class="muted" id="exp-why">Sweep uses this to skip jobs
+                    asking for far more experience than you have.</p>
+                </div>
+              </div>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="read-block">
+          <div class="read-name">
+            <{{ rh }} class="read-h">Roles Sweep will search for</{{ rh }}>
+            {% if derived.role_keywords %}
+              <span class="meta">{{ derived.role_keywords|length }} found</span>
+            {% endif %}
+          </div>
+          <div class="read-answer">
+            {% if derived.role_keywords %}
+              {# The first six; the rest are one press away, and all of them are in the page without a script. #}
+              {% set role_more = derived.role_keywords|length - 6 %}
+              <p class="chips" x-data="{ all: false }" :class="{ all: all }">{% for title in derived.role_keywords %}<span
+                  class="tag{{ ' extra' if loop.index > 6 }}">{{ title }}</span>{% endfor %}
+                {%- if role_more > 0 %}<button type="button" class="chip more"
+                  @click="all = !all" :aria-expanded="all ? 'true' : 'false'"
+                  x-text="all ? 'Show fewer' : '+{{ role_more }} more'">+{{ role_more }} more</button>{% endif %}</p>
+              <p class="muted">Taken from the roles on your résumé.</p>
+            {% else %}
+              <p class="empty"><b>No job titles found</b>
+                Sweep searches by job title, so it needs at least one. Add one
+                below, or upload a clearer résumé.</p>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="read-block">
+          <div class="read-name">
+            <{{ rh }} class="read-h">Your skills · tap one to tune it</{{ rh }}>
+            {% if derived.skill_weights %}
+              <span class="meta">{{ derived.skill_weights|length }} found</span>
+            {% endif %}
+          </div>
+          <div class="read-answer">
+            {% if not derived.skill_weights %}
+              <p class="empty"><b>No skills found</b>
+                That usually means the PDF has a thin text layer — a scan, or an
+                image export. Add your skills below, or upload a text-based PDF.</p>
+            {% else %}
+              {{ tip("review-tune", "Tap a skill to tell Sweep how much it matters.") }}
+            {% endif %}
+            {{ weight_editor(derived.skill_weights, commodity, importance|default({}), tune=true) }}
+            <div class="peeks">
+              {% call peek("How does ranking work?") %}
+                <p>A higher weight means a job asking for that skill
+                  ranks higher. Weighted by how well a skill picks out the jobs you
+                  want — a word that also appears in jobs you do not want scores
+                  low however good you are at it.</p>
+                {% if commodity %}
+                  <p>{{ and_list(commodity) }} appear in most job
+                    descriptions, so they separate listings less than the rest.
+                    That is about the market, not about you — they are kept.
+                    Open one to remove it.</p>
+                {% endif %}
+              {% endcall %}
+              {% if derived.penalty_terms %}
+                {% call peek("What counts against a match?") %}
+                  <p class="chips">{% for p in derived.penalty_terms|sort(attribute='weight', reverse=true) %}<span
+                      class="tag">{{ p.term }}</span>{% endfor %}</p>
+                  <p>Read as outside your field, so a job asking for
+                    one ranks lower. Nothing is excluded outright.</p>
+                {% endcall %}
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {# The reading's own notes, verbatim, behind a door that says what they
+         are: the operator's. What this field holds depends on the engine; the local one's notes are how the
+         profile was arrived at (field names, the corrections the router made, the terms it dropped), the other's
+         is a model's free prose. Either is written for someone checking the derivation, not for the person it is
+         about, so a visitor never sees it (D7C): what a visitor is told about their own reading is the sentence
+         above (derived.field_summary: the field, the years, the skills read) and the lists they can edit. The
+         notes are kept on the profile and shown here to the operator, on the console only. #}
+      {% if derived.notes and not public_mode %}
+        <details class="notes">
+          <summary>Technical notes on how this was read</summary>
+          <p class="muted">{{ derived.notes }}</p>
+        </details>
+      {% endif %}
+
+    {% else %}
+      {# ---- The operator's console, unchanged ---------------------------- #}
+      <div class="split read-first">
+        <div class="stack">
+          <div class="panel">
+            <h2>What it read</h2>
+            <div class="read-out">
+              <span class="label">The field it inferred</span>
+              <p class="inset">{{ derived.field_summary }}</p>
+            </div>
+            {% set whole, extra = experience_parts(derived) %}
+            {% if whole is not none %}
+              <div class="read-out">
+                <span class="label">Experience</span>
+                <div class="row">
+                  <label class="narrow"><span class="label">Years</span>
+                    <div class="stepper" x-data='{ n: {{ whole|tojson }} }'>
+                      <button type="button" @click="n = Math.max(0, n - 1)"
+                              aria-label="One year less">&minus;</button>
+                      <input type="number" name="experience_years" min="0" max="60"
+                             value="{{ whole }}" x-model.number="n"
+                             aria-label="Years of experience">
+                      <button type="button" @click="n = Math.min(60, n + 1)"
+                              aria-label="One year more">+</button>
+                    </div>
+                  </label>
+                  <label class="narrow"><span class="label">Months</span>
+                    <div class="stepper" x-data='{ n: {{ extra|tojson }} }'>
+                      <button type="button" @click="n = Math.max(0, n - 1)"
+                              aria-label="One month less">&minus;</button>
+                      <input type="number" name="experience_months" min="0" max="11"
+                             value="{{ extra }}" x-model.number="n"
+                             aria-label="Months of experience">
+                      <button type="button" @click="n = Math.min(11, n + 1)"
+                              aria-label="One month more">+</button>
+                    </div>
+                  </label>
+                </div>
+                <p class="muted">Read from the dates on your résumé. Correct it
+                  here if it read them wrong — the whole years set which
+                  seniority band the sweep searches, and drop any posting
+                  demanding more than three years above it.</p>
+              </div>
+            {% endif %}
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Titles it will search for</h2>
+              {% if derived.role_keywords %}
+                <span class="meta">{{ derived.role_keywords|length }}
+                  title{{ '' if derived.role_keywords|length == 1 else 's' }}</span>
+              {% endif %}
+            </div>
+            {% if derived.role_keywords %}
+              <p class="chips">{% for title in derived.role_keywords %}<span
+                  class="tag">{{ title }}</span>{% endfor %}</p>
+              <p class="muted">Every paid search is one of these in one
+                location, so this list multiplies what the sweep costs.</p>
+            {% else %}
+              <p class="empty"><b>No titles derived</b>
+                Every paid search is one title in one location, so a sweep with
+                no titles would search nothing. Upload a clearer résumé.</p>
+            {% endif %}
+          </div>
+
+          {% if derived.notes and not public_mode %}
+            <div class="callout">
+              <b>Worth knowing</b>
+              {{ derived.notes }}
+            </div>
+          {% endif %}
+
+          <div class="panel">
+            <label><span class="label">Name this profile</span>
+              <input name="name" value="{{ suggested_name }}" required
+                     aria-describedby="name-why">
+            </label>
+            <p class="muted" id="name-why">Saved as profiles/&lt;name&gt;.py, so you can re-run it later.
+              An existing profile of the same name is never replaced without asking.</p>
+            {% if clash %}
+              {% if not error %}
+                <p class="muted">This is the name from your résumé, and a profile
+                  already uses it. Change it below to keep both, or tick this to
+                  replace the old one.</p>
+              {% endif %}
+              <label class="choice"><input type="checkbox" name="overwrite" value="yes">
+                <span>Replace the existing {{ clash }} profile</span></label>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="stack">
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Skill weights, 1 to 5</h2>
+              {% if derived.skill_weights %}
+                <span class="meta">{{ derived.skill_weights|length }}
+                  term{{ '' if derived.skill_weights|length == 1 else 's' }}
+                  weighted</span>
+              {% endif %}
+            </div>
+
+            <div class="callout">
+              <b>Why some terms are weighted low</b>
+              Weighted by how well a term picks out jobs you want, not by how
+              central it is to your work. A word that also appears in jobs you
+              do not want scores low however good you are at it.
+            </div>
+
+            {# Not a warning any more. This screen told people their own
+               core stack was "worth removing" because the market names it
+               often — and pre-ticked the box. #}
+            {% if commodity %}
+              <div class="callout">
+                <b>Common in most postings</b>
+                {{ and_list(commodity) }} appear in most job descriptions, so
+                they separate one listing from another less than your rarer
+                skills do. That is about the market, not about you — they are
+                kept, and weighted lower. Tick one below to remove it.
+              </div>
+            {% endif %}
+
+            {% if not derived.skill_weights %}
+              <p class="empty"><b>No skills came back</b>
+                The model read the résumé but derived no skill weights, so
+                nothing would be scored. That usually means the PDF's text layer
+                is thin — try a text-based export and upload it again, or name
+                the skills yourself below.</p>
+            {% endif %}
+            {{ weight_editor(derived.skill_weights, commodity, importance|default({})) }}
+            {% if derived.skill_weights %}
+              <p class="muted">A higher weight means a listing naming that skill
+                scores higher. Remove a term to take it out of the scoring
+                entirely.</p>
+            {% endif %}
+          </div>
+
+          {% if derived.penalty_terms %}
+            <div class="panel">
+              <div class="panel-head">
+                <h2>Terms that push a listing down</h2>
+                <span class="meta">{{ derived.penalty_terms|length }}</span>
+              </div>
+              <p class="chips">{% for p in derived.penalty_terms|sort(attribute='weight', reverse=true) %}<span
+                  class="tag">{{ p.term }}</span>{% endfor %}</p>
+              <p class="muted">Read as off-domain for you, so a listing naming
+                one scores lower. Nothing is excluded outright.</p>
+            </div>
+          {% endif %}
+        </div>
+      </div>
+    {% endif %}
+
+    {# One bar across the foot: the way out on the left, the way on at the
+       right, and nothing between them competing for the click. #}
+    <div class="actionbar">
+      {% if resumes %}<button class="tertiary" type="submit" form="leave-out" name="do" value="deselect">Leave this résumé out</button>{% else %}<a class="tertiary" href="{{ url_for('upload') }}">{% if track
+        %}Your résumés{% else %}Start over with a different résumé{% endif %}</a>{% endif %}
+      <div class="actions">
+        <span class="meta sending" x-show="sent" x-cloak aria-live="polite">{%
+          if next_up %}Saving…{% elif public_mode %}Setting up your search…{% else %}Saving the profile…{% endif %}</span>
+        {# "Looks right" named a judgement, not a destination. The label now
+           says where the button goes, which is the one thing a user needs to
+           know before pressing it. #}
+        <button class="primary" type="submit" :disabled="sent">{%
+          if next_ready %}{{ 'Looks right, next résumé' if public_mode else 'Save and review next résumé' }}<span class="go"
+            aria-hidden="true">&rarr;</span>{% elif next_up %}Save résumé {{ track.n }}{% elif resumes
+            %}Save and continue to job search<span class="go"
+            aria-hidden="true">&rarr;</span>{% elif public_mode %}Continue to job search<span class="go"
+            aria-hidden="true">&rarr;</span>{% else %}Looks right{% endif %}</button>
+      </div>
+    </div>
+  </form>{% endif %}
+{%- if resumes %}
+  {%- if track %}
+  </div>
+</section>
+  {%- endif %}
+</div>
+  {%- if not deck_done %}
+  {{ cta(resumes) }}
+  {%- endif %}
+{%- endif %}
+</div>
+{%- if resumes %}
+{# Reads the résumés one after another while this page is open. #}
+<script src="{{ url_for('static', filename='reading.js') }}"></script>
+{%- endif %}
+{% endblock %}
+{% block after_main %}
+{%- if not resumes or track %}
+{# Unsaved edits are never lost without a choice (D7C). The editor is dirty when a control differs from the value it
+   was served with; anything that would take the page away then stops and asks, with a native dialog (focus is kept
+   inside it, Escape means stay). dirty.js says the rest. Outside the editor's form: a dialog form cannot nest in it. #}
+<dialog id="leave-guard" class="feedback leave-guard" role="alertdialog"
+        aria-labelledby="leave-guard-title" aria-describedby="leave-guard-text">
+  <form method="dialog">
+    <h2 id="leave-guard-title">You have unsaved changes</h2>
+    <p id="leave-guard-text" class="muted">What you changed here has not been saved. If you leave now, it is discarded.</p>
+    <div class="actions">
+      <button class="primary" value="stay" autofocus>Stay and keep editing</button>
+      <button class="secondary" value="leave">Discard changes and leave</button>
+    </div>
+  </form>
+</dialog>
+<script src="{{ url_for('static', filename='dirty.js') }}"></script>
+{%- endif %}
+{% endblock %}

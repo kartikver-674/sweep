@@ -1,0 +1,199 @@
+{# The skill-weight editor. On the review screen it is what you approve
+   before anything is spent; on the results screen it is what a re-rank
+   scores against. One macro so the two cannot drift apart — the POST field
+   names here are the contract logic.reweighted() reads. #}
+{% macro weight_editor(skill_weights, commodity=(), importance={}, tune=false) -%}
+{% if tune -%}
+{{ tune_editor(skill_weights, commodity, importance) }}
+{%- else -%}
+{% if skill_weights %}
+<div class="scroll-x">
+  <table class="weights">
+    <tr class="muted">
+      <th scope="col"><span class="visually-hidden">Rank</span></th>
+      <th scope="col">Skill</th>
+      <th scope="col">Level</th>
+      <th scope="col">Weight</th>
+      <th scope="col"><span class="visually-hidden">Remove</span></th>
+    </tr>
+    {% for w in skill_weights|sort(attribute='weight', reverse=true) %}
+      {# The Alpine scope is the ROW, not the stepper: the bar reads the same
+         `n` the stepper writes, so it moves as you click rather than showing
+         the weight the page was loaded with.
+
+         Single-quoted for the |tojson rule in configure.html: a weight that
+         ever arrived as a string would render with double quotes and
+         silently kill this scope. #}
+      <tr x-data='{ n: {{ w.weight|tojson }} }'>
+        {# The list is weight-sorted, so the position is information: it says
+           which terms this sweep is actually being steered by. #}
+        <td class="rank">{{ '%02d'|format(loop.index) }}</td>
+        {# The term travels with its weight so the POST is self-describing,
+           rather than the server having to reproduce this sort order to know
+           which weight is whose. #}
+        <td class="term">{{ w.term }}
+          {#- TWO badges, because these are two different facts and the
+              engine spent a long time collapsing them into one. The first
+              says what the RÉSUMÉ shows about this person; the second says
+              what the MARKET does with the word. "TypeScript: used at work,
+              and common" is the true sentence. "TypeScript is low signal"
+              was not. #}
+          {%- set tier = importance.get(w.term) %}
+          {%- if tier %}<span class="tag {{ tier.css }}"
+            title="{{ tier.why }}">{{ tier.label }}</span>{% endif %}
+          {%- if w.term in commodity %}<span class="tag low"
+            title="Common in job descriptions, so it separates listings less
+                   — not a judgement about your skill">Common</span>{% endif %}
+          <input type="hidden" name="term" value="{{ w.term }}"></td>
+        {# Server-rendered level AND a binding: without JavaScript the bar
+           is still correct, and with it the bar follows the stepper.
+
+           A class rather than a width interpolated into a style attribute:
+           that attribute is CSS, an editor validates it as CSS, and a
+           template expression in it is not. A weight is one of five
+           discrete steps, so five rules say it exactly. Clamped because the
+           weight comes back from a model: the schema types it as an integer
+           and does not bound it, and an unbounded one would land on no rule
+           at all, drawing no bar. #}
+        {%- set level = [[w.weight|int, 5]|min, 1]|max %}
+        <td class="level"><span class="bar" aria-hidden="true"><span
+              class="lv{{ level }}"
+              :style="'width: ' + (n * 20) + '%'"></span></span></td>
+        <td class="weight">
+          <div class="stepper">
+            <button type="button" @click="n = Math.max(1, n - 1)"
+                    aria-label="Lower the weight for {{ w.term }}">&minus;</button>
+            {# A real number input, not a readonly display: without Alpine the
+               buttons do nothing but the weight can still be typed, so the
+               screen never becomes read-only. #}
+            <input type="number" name="weight" min="1" max="5"
+                   value="{{ w.weight }}" x-model.number="n"
+                   aria-label="Weight for {{ w.term }}">
+            <button type="button" @click="n = Math.min(5, n + 1)"
+                    aria-label="Raise the weight for {{ w.term }}">+</button>
+          </div>
+        </td>
+        {# Not .drop: that is the upload screen's drop zone, and sharing the
+           name gave this cell its dashed border and its padding — a dashed
+           square that looked like an empty slot rather than a delete. #}
+        <td class="del">
+          <label class="remove">
+            {# Never pre-checked. A low final weight means the term is
+               common in the market, which is not evidence the person does
+               not have the skill — this box was ticked for TypeScript,
+               Node.js, MongoDB and Salesforce on a résumé built out of
+               them. Removal stays one click away, but it is the user's
+               click.
+
+               A word, not a glyph: "Remove", and once ticked "Undo", so what
+               the control does and what it has done are both said. #}
+            <input type="checkbox" name="drop" value="{{ w.term }}">
+            <span class="remove-ui" aria-hidden="true"><span class="remove-off">Remove</span><span
+                class="remove-on">Undo</span></span>
+            <span class="visually-hidden">Remove {{ w.term }}</span>
+          </label>
+        </td>
+      </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
+{# The parse misses things, and until now the editor could only re-weight or
+   remove what the model happened to find. Rendered even when the table is
+   not: a résumé the model read no skills from is exactly the one that needs
+   this, and it used to offer nothing at all.
+
+   NOT named "weight": that name belongs to the parallel term/weight lists
+   above, and a third value under it would desync them — which reassigns
+   every weight to the wrong term, silently, on the numbers that decide the
+   ranking. #}
+{{ add_row() }}
+{%- endif %}
+{%- endmacro %}
+
+{#- Tap to tune (A5, public review only). The same inputs as the table, in the same order, so the POST is the same
+   contract: ONE hidden `term` and ONE `weight` per skill, in the order of the sort below, because
+   logic.reweighted() zips the i-th term with the i-th weight and refuses unequal lists. Hidden rows (the ones behind
+   "+N more", a closed pop) are hidden by CSS only, never by removing or disabling an input, so they still submit.
+
+   Without JavaScript every row, every pop and the add row are visible (a plain form); with it (<html class="js">,
+   theme.js) the closed ones are hidden before first paint and Alpine opens them. `n` is the row's weight, read by the
+   dots, the word and the stepper alike, as the table's bar reads it. #}
+{% macro tune_editor(skill_weights, commodity, importance) -%}
+{%- set ranked = (skill_weights or [])|sort(attribute='weight', reverse=true) -%}
+{%- set more = ranked|length - 10 -%}
+{%- set words = ['barely', 'a little', 'some', 'a lot', 'a huge amount'] -%}
+<div class="tune-wrap" x-data="{ all: false, add: {{ 'false' if ranked else 'true' }} }">
+  <div class="tunes" data-tunes :class="{ all: all }">
+    {%- for w in ranked %}
+    {#- Single-quoted for the |tojson rule: a weight that ever arrived as a string would render with double quotes and
+       silently kill this scope. Clamped like the table's bar, because the weight comes back from a model. #}
+    {%- set level = [[w.weight|int, 5]|min, 1]|max %}
+    {%- set tier = importance.get(w.term) %}
+    <div class="tune-row{{ ' extra' if loop.index > 10 }}" x-data='{ n: {{ w.weight|tojson }}, open: false }'
+         :class="{ open: open }">
+      <button type="button" class="tune-chip" @click="open = !open"
+              :aria-expanded="open ? 'true' : 'false'" aria-controls="tune-{{ loop.index }}">{{ w.term }}<span
+          class="dots" aria-hidden="true">{% for k in range(1, 6) %}<i{% if k <= level %} class="f"{% endif %}
+            :class="{ f: n >= {{ k }} }"></i>{% endfor %}</span><span class="visually-hidden">, weight <span
+            x-text="n">{{ w.weight }}</span> of 5</span></button>
+      <input type="hidden" name="term" value="{{ w.term }}">
+      <div class="tune-pop" id="tune-{{ loop.index }}">
+        <div class="stepper">
+          <button type="button" @click="n = Math.max(1, n - 1)"
+                  aria-label="Lower the weight for {{ w.term }}">&minus;</button>
+          <input type="number" name="weight" min="1" max="5"
+                 value="{{ w.weight }}" x-model.number="n"
+                 aria-label="Weight for {{ w.term }}">
+          <button type="button" @click="n = Math.min(5, n + 1)"
+                  aria-label="Raise the weight for {{ w.term }}">+</button>
+        </div>
+        <span class="tune-word" x-text="['barely', 'a little', 'some', 'a lot', 'a huge amount'][Math.min(5, Math.max(1, Math.round(+n || 1))) - 1]">{{ words[level - 1] }}</span>
+        {#- Never pre-checked (see the table): a low weight is the market's, not evidence the person lacks the skill. #}
+        <label class="remove">
+          <input type="checkbox" name="drop" value="{{ w.term }}">
+          <span class="remove-ui" aria-hidden="true"><span class="remove-off">Remove</span><span
+              class="remove-on">Undo</span></span>
+          <span class="visually-hidden">Remove {{ w.term }}</span>
+        </label>
+        {%- if tier %}<span class="tag {{ tier.css }}" title="{{ tier.why }}">{{ tier.label }}</span>{% endif %}
+        {%- if w.term in commodity %}<span class="tag low"
+          title="Common in job descriptions, so it separates listings less — not a judgement about your skill">Common</span>{% endif %}
+        <p class="tune-why">
+          {%- if tier %}{{ tier.why }}
+          {%- elif w.term in commodity %}Most job posts mention {{ w.term }}, so it separates listings less. That is about the market, not about you — it stays in.
+          {%- else %}Jobs that ask for {{ w.term }} rank higher the more you weight it.{% endif -%}
+        </p>
+      </div>
+    </div>
+    {%- endfor %}
+    {%- if more > 0 %}
+    <button type="button" class="chip more" @click="all = !all" :aria-expanded="all ? 'true' : 'false'"
+            x-text="all ? 'Show fewer' : '+{{ more }} more'">+{{ more }} more</button>
+    {%- endif %}
+    <button type="button" class="tune-chip tune-add" @click="add = !add" :aria-expanded="add ? 'true' : 'false'"
+            aria-controls="add-skills">+ Add a skill</button>
+  </div>
+  {#- The parse misses things: the same add row as the table's editor (one macro, so the names cannot drift), shut
+     until the chip opens it. NOT named "weight": see add_row. #}
+  <div class="add-skills" id="add-skills" :class="{ open: add }">{{ add_row() }}</div>
+</div>
+{%- endmacro %}
+
+{% macro add_row() -%}
+<div class="row">
+  <label><span class="label">Add skills the parse missed</span>
+    <input type="text" name="add_skills"
+           placeholder="kubernetes, terraform, grpc"></label>
+  <label class="add-weight"><span class="label">At weight</span>
+    <div class="stepper" x-data="{ n: 3 }">
+      <button type="button" @click="n = Math.max(1, n - 1)"
+              aria-label="Lower the weight for the added skills">&minus;</button>
+      <input type="number" name="add_weight" min="1" max="5" value="3"
+             x-model.number="n" aria-label="Weight for the added skills">
+      <button type="button" @click="n = Math.min(5, n + 1)"
+              aria-label="Raise the weight for the added skills">+</button>
+    </div>
+  </label>
+</div>
+{%- endmacro %}

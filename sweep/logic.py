@@ -1,0 +1,1523 @@
+"""Flask-free logic behind the screens: form validation, the reachability
+split, and the empty-result diagnosis.
+
+Nothing here imports Flask or touches create_app, which is the point — the
+reachability split in particular has to be testable against rows copied
+straight out of a real, paid `jobs_combined.csv`, with no test client in the
+way. Reviewing it through a three-row hand-written fixture is how it shipped
+filing 1046 jobs abroad under "you can work here now".
+"""
+
+import datetime
+import os
+import re
+import sys
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# bucket() below is the existing, measured reachability classification — the
+# spec called this screen a port of it, not a second implementation. Imported
+# once here at module load, never inside the function, which would grow
+# sys.path on every page render.
+sys.path.insert(0, os.path.join(REPO_ROOT, "auto-apply"))
+import linkedin_shortlist  # noqa: E402
+
+
+# A profile name becomes both a filesystem path (profiles/<name>.py) and a
+# Python module (config.py does importlib.import_module(f"profiles.{name}")),
+# so it is checked against an allowlist rather than merely stripped — a name
+# like "../../../../tmp/x" or an absolute path survives os.path.join(), which
+# silently discards everything before an absolute later component. A leading
+# digit is rejected too since that would not be a valid module name.
+_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
+
+
+def _valid_profile_name(name):
+    return bool(_NAME_RE.fullmatch(name))
+
+
+# Configure-screen scope -> real config keys. "locations"/"remote_scopes" feed
+# SEARCH.locations / SETTINGS.remote_scopes (every site); "linkedin_locations"
+# additionally overrides SITES.linkedin.locations, because
+# SITES[site].get("locations", SEARCH["locations"]) means LinkedIn — the most
+# expensive site — otherwise keeps searching config.py's default (India +
+# Remote) no matter what SEARCH.locations says (scraper.plan_for_site).
+#
+# Every LinkedIn location below is a config.LINKEDIN_GEO_IDS key, verified per
+# that table's own comments (python verify_geoids.py) — never a name invented
+# here. make_profile.render() checks this again against the live config, since
+# that guard has to hold for the CLI path too, not just this form.
+_INDIA_CITIES = ["Delhi", "Gurgaon", "Bengaluru", "Hyderabad", "Pune", "Mumbai"]
+# Same set profiles/global_remote.py and profiles/global_all.py already use —
+# reused rather than re-picked, so "verified" keeps meaning the same thing.
+_VERIFIED_COUNTRIES = ["United States", "United Kingdom", "Canada", "Ireland",
+                       "Germany", "Netherlands", "Australia", "Singapore",
+                       "United Arab Emirates"]
+
+# "Remote" has no geoId: the adapter special-cases it onto SITES.linkedin's
+# remote_geo (config.py's SITES comment). It is a location you can search, so
+# it belongs in the picker; it is just not a place.
+REMOTE = "Remote"
+
+
+def location_groups(scope=None):
+    """The picker's option list: groups of place names, each tagged with the
+    scopes it may be offered under.
+
+    Every entry is a config.LINKEDIN_GEO_IDS key. That table is the whole
+    guard: "A missing or wrong geoId is NOT a soft failure: LinkedIn ignores
+    the free-text location and returns US results, so you pay full price for
+    the wrong country" — so a picker of free text would be a way to buy the
+    United States by typing "Bangalore". Read live rather than copied, so a
+    geoId verified (or removed) in config appears (or stops appearing) here.
+
+    Locations NARROW the work scope and must never widen it, so what is on
+    offer depends on which jobs were asked for:
+
+        india   Indian cities only. Offering "United States" under "onsite
+                or hybrid, in India" invites a choice the engine has to
+                throw away afterwards, which is the whole class of bug this
+                screen is being fixed for.
+        global  Indian cities AND the verified countries.
+        remote  nothing — a place cannot narrow "from anywhere".
+
+    `scope=None` is every group there is: the superset the unknown-name check
+    validates against, so a typo still earns the money-protecting refusal
+    rather than being quietly narrowed away.
+
+    Dicts rather than tuples because the picker renders this client-side too
+    — the menu has to change when the scope radio changes, with no round
+    trip — and one table handed to both sides is what stops the two
+    disagreeing about what is on offer.
+
+    No "Anywhere remote" group any more. "Remote" is a work ARRANGEMENT and
+    it is the first question on the screen; offering it again as a place made
+    the two controls answer the same question and disagree.
+    """
+    import config
+    known = list(config.LINKEDIN_GEO_IDS)
+    cities = [c for c in _INDIA_CITY_NAMES if c in known]
+    # Everything else, in config's own order. Grouping only: a city added to
+    # that table later lands under "Countries" until it is named above, which
+    # is untidy rather than wrong.
+    countries = [c for c in known
+                 if c not in cities and c not in _INDIA_ALIASES]
+    groups = [{"heading": "India", "scopes": ["india", "global"],
+               "names": cities},
+              {"heading": "Countries", "scopes": ["global"],
+               "names": countries}]
+    return [g for g in groups if scope is None or scope in g["scopes"]]
+
+
+def searchable_locations(scope=None):
+    """location_groups as (heading, names) pairs, for a server-side render."""
+    return [(g["heading"], g["names"]) for g in location_groups(scope)]
+
+
+def allowed_locations(scope=None):
+    """Every place name this scope may be narrowed to, plus REMOTE.
+
+    REMOTE is accepted but never offered: a page loaded before it left the
+    menu can still post it, and a 400 on a control the user cannot see is a
+    worse answer than ignoring a token that now means nothing.
+    _configure_overrides drops it rather than treating it as a place.
+    """
+    return {name for _, names in searchable_locations(scope)
+            for name in names} | {REMOTE}
+
+
+# Gurugram is the same geoId as Gurgaon under LinkedIn's own label; offering
+# both would let someone pay twice for one city.
+_INDIA_ALIASES = {"Gurugram"}
+# Presentation only — which verified names sit under the "India" heading.
+# Separate from _INDIA_CITIES, which is what the india SCOPE searches:
+# widening that set would change what an existing choice costs.
+_INDIA_CITY_NAMES = ["Delhi", "Gurgaon", "Chandigarh", "Bengaluru",
+                     "Hyderabad", "Pune", "Mumbai"]
+
+
+def _hints_for(names):
+    """The free-source location vocabulary for a set of picked place names.
+
+    Free boards and feeds have no location parameter, so the only way the
+    picker can narrow a Free Sweep is to match each posting's own location
+    text. config.LOCATION_MATCH holds the fragments; scraper.location_allowed
+    does the matching, on alphanumeric boundaries.
+    """
+    import config
+    out = []
+    for name in names:
+        out.extend(config.LOCATION_MATCH.get(name, []))
+    return sorted(set(out))
+
+
+def _india_hints():
+    import config
+    return _hints_for(["India"])
+
+
+# Each entry is the COMPLETE set of state keys a scope owns, so switching
+# between them can never leave one behind — out.update(_SCOPE[scope]) in
+# _configure_overrides replaces all of them at once.
+#
+#   remote_scopes          the post-fetch REMOTE filter (scraper.finalize)
+#   work_scope             the post-fetch ARRANGEMENT filter, for the other two
+#   location_hints         the post-fetch PLACE filter, free sources only
+#   locations              the paid SEARCH PLAN (keywords x locations)
+#   linkedin_locations     the same, for the one site that overrides it
+#   linkedin_remote_only   f_WT=2 on every LinkedIn search
+#
+# work_scope and location_hints are what make the three answers three
+# different sweeps. Before them, "india" and "global" both set remote_scopes
+# to [] and neither's location list reached a free source, so on the free
+# path — which is the default front door — they returned identical job sets.
+# What a remote posting writes where a city would go. In the "india" scope's
+# place filter so a free source keeps "Remote" / "Anywhere" rows at fetch
+# time; scraper.remote_open_to_home then decides which of them India can take.
+_REMOTE_PLACE_WORDS = ("remote", "anywhere", "worldwide")
+
+_SCOPE = {
+    # India: an office role in India, OR a remote role open to India
+    # (2026-11-20; it used to be onsite/hybrid only, which dropped every feed
+    # row and every "Remote - India" posting by default). The arrangement
+    # half is work_scope="india" (scraper._sweep_filters); the geography
+    # half is location_hints, every spelling of an Indian city config knows
+    # (HOME_LOCATION_HINTS, via LOCATION_MATCH["India"]) plus the words a
+    # remote posting uses for its place.
+    "india": {"remote_scopes": [], "work_scope": "india",
+              "location_hints": _india_hints() + list(_REMOTE_PLACE_WORDS),
+              "locations": _INDIA_CITIES,
+              "linkedin_locations": _INDIA_CITIES, "linkedin_remote_only": False},
+    # LinkedIn has no worldwide-remote search: f_WT=2 filters workplace type
+    # WITHIN one geography, so paying for it across many countries buys
+    # inventory this repo already measured as unreachable — see
+    # profiles/kartik_reachable.py's docstring: of a 2026-07-26 sweep's 480
+    # "remote" rows at score >= 10, only 27 were actually reachable from
+    # India; 245 of the top 252 were remote-only-within Germany / Spain /
+    # UAE / the UK. So LinkedIn here buys the SAME India-remote-only
+    # inventory kartik_reachable.py does — locations=["Remote"], one
+    # geography (remote_geo inherits config.py's "India" — see render()) —
+    # not nine countries. Worldwide remote is left to the free feeds
+    # (RemoteOK, WWR, Remotive, Jobicy, Himalayas): built for exactly this,
+    # they carry far more of it than LinkedIn, and they're already on by
+    # default, so there's nothing to switch on here.
+    #
+    # linkedin_remote_only is True, not False. It used to rely on the literal
+    # token "Remote" being in the location list to make _build_linkedin_url
+    # add f_WT=2 — so narrowing the picker to a city removed it, and LinkedIn
+    # was billed for onsite rows that finalize() then discarded for not being
+    # remote. Stating the flag makes that impossible whatever the locations
+    # say. No place filter: "from anywhere" is the whole point.
+    "remote": {"remote_scopes": ["worldwide", "remote"], "work_scope": "remote",
+               "location_hints": [], "locations": ["Remote"],
+               "linkedin_locations": ["Remote"], "linkedin_remote_only": True},
+    # Global onsite/hybrid: the same arrangement filter as india, with no
+    # geography at all until the picker adds one. The nine countries are the
+    # paid RETRIEVAL plan, not a filter — a free-source row from a tenth
+    # country is still an onsite job this answer asked for.
+    "global": {"remote_scopes": [], "work_scope": "global",
+               "location_hints": [], "locations": _VERIFIED_COUNTRIES,
+               "linkedin_locations": _VERIFIED_COUNTRIES,
+               "linkedin_remote_only": False},
+}
+
+# Which answer a session starts on when nobody has chosen yet. India,
+# because this beta is India-focused and "onsite or hybrid, in India" is what
+# most of its visitors are actually looking for — it is the first radio on
+# the screen for the same reason.
+#
+# It applies ONLY when no scope has been committed. ensure_scope() checks
+# that, so navigating back to the screen can never overwrite a real choice.
+DEFAULT_SCOPE = "india"
+
+# Sweep's own keys inside a scope entry, in the order a reader wants them.
+SCOPE_KEYS = ("remote_scopes", "work_scope", "location_hints", "locations",
+              "linkedin_locations", "linkedin_remote_only")
+
+# Real stack names need '.', '+', '#', '/', '-' ("node.js", "c++", "c#",
+# "ci/cd", "full-stack"); nothing else has a legitimate reason to be in a
+# skip-term, so it is rejected rather than guessed at.
+_CHIP_RE = re.compile(r"[A-Za-z0-9 .+#/-]+")
+
+
+class _FormError(ValueError):
+    """A Configure-screen field failed validation. str(exc) is safe to show
+    the user — never echoes the raw input back."""
+
+
+def _parse_int(raw, lo, hi, label):
+    """Strict integer parse within [lo, hi]. Never pass an unvalidated string
+    from a form into config — this is the one gate every numeric field goes
+    through before it can reach a profile."""
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        raise _FormError(f"{label} must be a whole number.")
+    if not (lo <= value <= hi):
+        raise _FormError(f"{label} must be between {lo} and {hi}.")
+    return value
+
+
+def _parse_chips(raw, label):
+    """Comma-separated free text -> a validated list of terms. Rejected, not
+    sanitised, so the response says exactly what is wrong.
+
+    De-duplicated case-insensitively, first spelling kept. A repeat is not an
+    error — the picker can only produce one by a stale post, and a typed
+    "React, react" is an obvious slip — but it must not survive: a duplicated
+    LOCATION multiplies paid searches (three "Delhi"s planned and billed
+    three identical LinkedIn runs), and a duplicated skip-term counts against
+    the cap twice.
+    """
+    terms = [t.strip() for t in str(raw).split(",") if t.strip()]
+    for term in terms:
+        if not _CHIP_RE.fullmatch(term):
+            raise _FormError(
+                f"{label} can only use letters, digits, spaces and . + # / - "
+                f"— check {term!r}.")
+    seen, out = set(), []
+    for term in terms:
+        if term.lower() not in seen:
+            seen.add(term.lower())
+            out.append(term)
+    return out
+
+
+# How many terms the avoid box accepts. It is one line of text with a
+# three-term placeholder, so twenty is already far past what the control was
+# designed for — and each one becomes a compiled regex scanned over the full
+# description of every row in the sweep. Rejected, never truncated: silently
+# dropping the 21st term is the same class of bug as everything else this
+# screen is being fixed for.
+MAX_AVOID_TERMS = 20
+
+
+# The PUBLIC journey. Four stages, not the seven routes behind them: the
+# routes are a correct engineering decomposition and a poor mental model, and
+# "Free or paid", "Configure", "Confirm" and "Running" are four separate
+# announcements of one decision a job seeker thinks of as "how should this
+# search work".
+#
+# Each entry is (link, label, members, facts). `link` is the endpoint the
+# chip navigates to; `members` are the routes that light it up; `facts` is
+# which entry of the opens/done tables below decides it. A plain step is all
+# four of those at once, which is why the local STEPS list can stay 2-tuples.
+PUBLIC_STAGES = [
+    ("upload", "Résumé", ("upload",), "upload"),
+    ("review", "Profile", ("review",), "review"),
+    # Links to /key because that is where the stage begins. Gated on
+    # "search" rather than on /key's own guard: /key renders with no profile
+    # and then both of its buttons redirect to /review, which is exactly the
+    # "offers a step that bounces" failure this function exists to prevent.
+    ("key", "Search", ("key", "configure", "confirm", "running"), "search"),
+    ("results", "Jobs", ("results",), "results"),
+]
+
+
+def step_states(steps, state, current, links=None):
+    """Each step's number, whether it can be opened, and whether it is done.
+
+    The rule is asymmetric on purpose. A step is never offered when its
+    route would redirect — that is the floor, and the reason this reads the
+    same facts the guards do rather than holding a second opinion about the
+    flow. It may be STRICTER than a guard where the screen would render with
+    nothing to say: /running only requires raw_plan, which costed() writes on
+    every /configure visit, so guard parity alone would advertise a progress
+    screen for a sweep that has not started. Being stricter cannot send
+    anyone somewhere unexpected; being laxer can.
+
+    The header used to render all seven as plain tabs, four of which redirect
+    away on a fresh session.
+
+    Flask-free and state-in/list-out so the table below can be tested against
+    the guards directly, with no test client in the way.
+    """
+    has_resume = bool(state.get("resume_text"))
+    has_profile = bool(state.get("profile"))
+    # `cap_usd is not None` is what no_key_yet() checks, and a real zero cap
+    # is a verified key — `bool(cap)` would call an exhausted account no key.
+    has_key = state.get("cap_usd") is not None
+    # Chose the free path on step 3. A CHOICE, not the absence of a key: the
+    # two states are opposites downstream ("has not connected one yet" must
+    # still send you to step 3, "declined one" must not), and only a recorded
+    # choice can tell them apart.
+    free_only = bool(state.get("free_only"))
+    has_access = has_key or free_only
+    has_plan = bool(state.get("raw_plan"))
+    # Set by POST /run only, so it is the one cheap fact that says a sweep
+    # was launched. Nothing here may read .done_combos or the account: this
+    # runs on every page render, including the money screens.
+    launched = state.get("proc") is not None
+
+    opens = {"upload": True,
+             "review": has_resume,
+             "key": True,
+             "configure": has_profile and has_access,
+             "confirm": has_profile and has_access,
+             # launched, not has_plan: see the docstring.
+             "running": launched,
+             "results": has_profile,
+             # The public Search STAGE, which is four routes wide. It opens
+             # on the profile: that is what /key/free and POST /key both
+             # require before they will do anything but redirect.
+             "search": has_profile,
+             # Public mode's last step: the profile is downloaded, not
+             # written to disk. Unknown to the local flow, which never
+             # puts it in STEPS.
+             "profile_done": has_profile}
+    done = {"upload": has_resume,
+            "review": has_profile,
+            "key": has_access,
+            "configure": has_plan,
+            "confirm": launched,
+            "running": launched,
+            # The whole Search stage is behind you once a sweep is away —
+            # the same fact its last member reports, because the stage ends
+            # where /running does.
+            "search": launched,
+            # The last step. Nothing is downstream of it to prove it finished.
+            "results": False,
+            "profile_done": False}
+
+    # A 2-tuple is a step that is its own stage: one member, and its own
+    # entry in the tables above. Unpacked here so the local STEPS list never
+    # had to grow two columns it has no use for.
+    rows = [(entry + (None, None))[:4] if len(entry) < 4 else entry
+            for entry in steps]
+    rows = [(link, label, members or (link,), facts or link)
+            for link, label, members, facts in rows]
+
+    at = next((i for i, (_, _, members, _) in enumerate(rows)
+               if current in members), None)
+    # A stage can point somewhere other than its usual route when the
+    # session says so — the Search stage becomes the running sweep while one
+    # is live, rather than the form that would configure a second.
+    links = links or {}
+    return [{"slug": links.get(link, link), "label": label, "n": i + 1,
+             "current": current in members,
+             # Never mark the step being viewed as done, whatever state says:
+             # you are standing on it, which is the more useful fact.
+             "done": done.get(facts, False) and current not in members,
+             "open": opens.get(facts, False),
+             "next": at is not None and i == at + 1}
+            for i, (link, label, members, facts) in enumerate(rows)]
+
+
+# config keys are lowercase, and prose that names a job board should spell it
+# the way the board does: "Linkedin" out of Jinja's |title filter is a typo a
+# reader notices. A key with no entry falls back to itself, so a paid site
+# added to config appears in the sentence (lowercase) rather than vanishing
+# from it.
+#
+# The free half is here too, because a row's source_site reaches the results
+# screen as a user-facing column and "remoteok" in a table of job listings is
+# the engine's key, not a board's name.
+#
+# Taken from the adapters, not guessed: sources.ats.ATS, sources.feeds'
+# Source= literals, sources.enterprise.EMPLOYERS, plus optum's own module and
+# the three paid boards. Cross-checked against every source_site prefix in
+# output/'s jobs_*.csv. An unlisted key still falls through to itself, so a
+# board added later appears lowercase rather than vanishing.
+# How each scope reads on a summary. The keys are _SCOPE's, so a scope added
+# there without a phrase here falls back to the key rather than vanishing from
+# the one screen that says what is about to be searched.
+# What each answer IS, in the summary's own voice. They match the radio
+# labels on the Search-preferences screen, because a summary that renames the
+# choice it is summarising is one more thing to reconcile.
+SCOPE_LABELS = {"india": "In India, or remote open to India",
+                "remote": "Remote roles",
+                "global": "Onsite or hybrid, worldwide"}
+
+
+def scope_label(scope):
+    return SCOPE_LABELS.get(scope, scope or "")
+
+
+SITE_LABELS = {"linkedin": "LinkedIn", "indeed": "Indeed", "naukri": "Naukri",
+               # sources.ats.ATS
+               "greenhouse": "Greenhouse", "lever": "Lever", "ashby": "Ashby",
+               "breezy": "Breezy", "smartrecruiters": "SmartRecruiters",
+               # sources.feeds
+               "himalayas": "Himalayas", "jobicy": "Jobicy",
+               "remoteok": "RemoteOK", "remotive": "Remotive",
+               "wwr": "We Work Remotely",
+               # sources.enterprise.EMPLOYERS, and optum's own module
+               "accenture": "Accenture", "amazon": "Amazon",
+               "jpmorgan": "J.P. Morgan", "sap": "SAP", "oracle": "Oracle",
+               "optum": "Optum"}
+
+
+def site_label(name):
+    """A board's own spelling of its name.
+
+    The free adapters write `platform:company` ("greenhouse:sumup"), so the
+    platform is taken from the left of the colon — the company already has a
+    column of its own on every screen that shows this, and repeating it here
+    made the narrowest column the widest.
+    """
+    # `or ""` on the way out as well as in: a None reaches a template as the
+    # four characters "None", which is worse than an empty cell.
+    return SITE_LABELS.get((name or "").split(":")[0], name) or ""
+
+
+# The orders /results offers, and the label each one wears. A key returns a
+# tuple that always sorts ASCENDING — no reverse= anywhere — because reverse
+# would also flip the "no value" flag and float every row missing the field to
+# the top. Every key ends in -score, so rows that tie on the chosen field are
+# still ranked by how well they match.
+#
+# Pay is deliberately absent. Measured across output/ (10,397 rows,
+# 2026-09-10) only 5% state one at all, and those are multi-currency free text
+# ("₹5,00,000 - ₹15,00,000 a year", "Up to ₹1,80,000 a month"), so the order
+# would be 516 rows above 9,881 arbitrary ones. A filter for "states pay"
+# would be the honest version of that, not a sort.
+SORTS = {
+    "score": ("Best match", lambda r: (-_as_int(r.get("score")),)),
+    "recent": ("Newest first",
+               lambda r: (0, _neg_date(_sortable_date(r.get("date_posted"))),
+                          -_as_int(r.get("score")))
+               if _sortable_date(r.get("date_posted"))
+               else (1, "", -_as_int(r.get("score")))),
+    "experience": ("Least experience first",
+                   lambda r: (0, _stated_years(r.get("experience_required")),
+                              -_as_int(r.get("score")))
+                   if _stated_years(r.get("experience_required")) is not None
+                   else (1, 0, -_as_int(r.get("score")))),
+}
+DEFAULT_SORT = "score"
+
+_ISO_DATE = re.compile(r"(\d{4}-\d{2}-\d{2})")
+_LEADING_YEARS = re.compile(r"\s*(\d{1,2})")
+
+
+def _sortable_date(value):
+    """The YYYY-MM-DD at the start of a date cell, or None.
+
+    A PREFIX, not a full match: 353 rows on disk carry a full ISO-8601
+    timestamp ("2026-07-27T16:05:10.325Z") rather than a bare date, and a
+    fullmatch called every one of them undated — sinking 353 well-dated rows
+    to the bottom of "newest first". Anything with no leading date really is
+    undated and sorts last.
+
+    The time is dropped rather than used. Only 3% of rows carry one, so
+    ordering within a day would be false precision for the other 97%; rows
+    from the same day tie and fall through to the score tie-break.
+    """
+    m = _ISO_DATE.match(str(value or "").strip())
+    return m.group(1) if m else None
+
+
+def _neg_date(value):
+    """Newest first, as an ascending key: invert each digit of the date."""
+    return "".join(str(9 - int(c)) if c.isdigit() else c for c in value)
+
+
+def _stated_years(value):
+    """The leading integer of a stored experience cell ("3+" -> 3), or None.
+
+    The column holds what the parser found; older rows hold raw text. Only a
+    leading integer is trusted, and anything else is "the posting didn't say"
+    — which must sort LAST rather than as zero, which would rank every
+    unknown as the easiest job on the page.
+    """
+    m = _LEADING_YEARS.match(str(value or ""))
+    return int(m.group(1)) if m else None
+
+
+def sort_rows(rows, sort):
+    """`rows` in the chosen order. An unknown order falls back to the default
+    rather than raising: it arrives from a query string."""
+    _, key = SORTS.get(sort) or SORTS[DEFAULT_SORT]
+    return sorted(rows, key=key)
+
+
+# How many listings a section shows before it offers the rest. A real sweep
+# is 1600 rows; three sections of everything is a page nobody scrolls to the
+# bottom of, and the rows past the first screenful of a score-ranked list are
+# the ones least worth reading first.
+SECTION_CAP = 25
+
+
+# Every way a sweep can be sitting when the child is no longer running.
+# One name per state, decided in one place, because the screen, the SSE
+# payload and the tests each used to re-derive "is it finished" from counts.
+SWEEP_STATES = ("running", "finished", "stopped", "out_of_credit", "halted",
+                "credit_changed", "partial", "incomplete")
+
+
+def sweep_state(running, outstanding, stopped_by_user=False,
+                credit_left=None, cheapest_search=None, authorization=None,
+                failed=False, planned=0):
+    """Which of SWEEP_STATES this sweep is in.
+
+    "halted" is the honest default and it exists on purpose: a sweep that
+    ended early for a reason we cannot name must not be labelled as one we
+    can. Only two reasons are ever claimed — the user pressed Stop, which is
+    recorded when they do, and there is not enough credit left to buy even
+    the cheapest search still outstanding, which is a comparison of two
+    figures rather than a guess about a crash.
+
+    V2-D1 adds two more, each claimed only on the engine's own record
+    (`authorization`, scraper.AUTH_RECORD): "credit_changed" — the accounts
+    no longer covered the full sweep when it came to start, so nothing ran —
+    and "partial" — the visitor chose to run what their credit covered, and
+    the searches left over are exactly the ones that choice left out.
+
+    `failed` is the process's own word that it did not end well. A run with
+    no planned searches (the free path) has nothing outstanding for its whole
+    life, so "nothing outstanding" is proof of nothing there: the caller
+    passes `failed` for that case and the run ends stopped or halted, never
+    finished.
+
+    The same goes for a PAID run whose every planned search is in the ledger
+    (D7C): the ledger proves the searches ran, not that the engine ended well.
+    If the process then failed or was interrupted and the worker never declared
+    the result final, the run is "incomplete" — every search ran, then it
+    stopped — not "finished" and not "halted" (halted says the credit is not
+    spent, which would be false here). `planned` is what tells the two apart;
+    an explicit stop is still "stopped" and the worker's own timeout is named by
+    the caller, as before.
+    """
+    outcome = (authorization or {}).get("outcome")
+    if running:
+        return "running"
+    if outcome == "refused":
+        return "credit_changed"
+    if outstanding == 0 and not failed:
+        return "finished"
+    if outcome == "partial" and outstanding > 0 and outstanding <= (
+            (authorization.get("skipped_insufficient_capacity") or 0)
+            + (authorization.get("skipped_budget") or 0)):
+        return "partial"
+    if stopped_by_user:
+        return "stopped"
+    if outstanding == 0 and failed and planned:
+        return "incomplete"
+    if (credit_left is not None and cheapest_search is not None
+            and credit_left < cheapest_search):
+        return "out_of_credit"
+    return "halted"
+
+
+def results_ending(state, timed_out=False):
+    """What the Results screen says about HOW the run behind it ended, or None
+    when it ended whole (or is still going, which the status strip says).
+
+    Results is reachable from a run that failed, that the visitor stopped, or
+    that ran only the part their credit covers: the jobs are real and worth
+    having, and a page that reads exactly like a finished search would be
+    saying more than is true. `state` is sweep_state's own word for the run
+    (the Running screen's), so the two screens cannot disagree, and `timed_out`
+    is only ever the worker's own `run_timeout`. Wording is D5's, shortened:
+    a caution, never a verdict, and never a cause nobody recorded.
+
+    {"tone": "" | "warn" | "part", "headline", "detail", "jobs"}, or None. `jobs`
+    is how the page's own count is worded for this ending ("3 jobs found before
+    the search stopped"), so the heading does not say "matched your profile" over
+    a search that did not finish.
+    """
+    found = "These are the jobs it found before it stopped."
+    stopped = "found before the search stopped"
+    if state == "partial":
+        return {"tone": "part", "headline": "Part of your search ran",
+                "jobs": "from the part of your search that ran",
+                "detail": "These are the jobs from the paid searches your credit covers, as you "
+                          "chose. The others were not run, and nothing was charged for them."}
+    if state == "credit_changed":
+        return {"tone": "warn", "headline": "Your search did not start", "jobs": "",
+                "detail": "Nothing was searched and nothing was charged."}
+    if state == "stopped":
+        return {"tone": "", "headline": "You stopped this search", "jobs": stopped,
+                "detail": "These are the jobs it found before you stopped it."}
+    if state == "out_of_credit":
+        return {"tone": "warn", "headline": "This search stopped when the credit ran out", "jobs": stopped,
+                "detail": "These are the jobs found by the searches that ran."}
+    if state == "halted":
+        return {"tone": "warn",
+                "headline": "This search ran out of time" if timed_out else "This search did not finish",
+                "jobs": stopped, "detail": found}
+    if state == "incomplete":
+        # Every paid search ran and was paid for; the sweep stopped after them. Said as that, and no more:
+        # nothing about why, and nothing about being charged less.
+        return {"tone": "warn",
+                "headline": "This search ran out of time" if timed_out else "This search did not finish",
+                "jobs": "found by the searches that ran",
+                "detail": "Every search ran, then the sweep stopped before it finished. "
+                          "These are the jobs it found."}
+    return None
+
+
+# Two vocabularies describe one sweep. The WORKER says queued / running /
+# done / failed / stopped / interrupted; snapshot() says running / finished /
+# stopped / out_of_credit / halted plus a `queued` flag. The status strip has
+# to read the same on a page rendered from the cheap worker status as on one
+# updated from a /progress poll, so both are folded to these five first.
+RUN_PHASES = ("queued", "running", "finished", "stopped", "failed")
+
+_WORKER_PHASE = {"queued": "queued", "running": "running", "done": "finished",
+                 "stopped": "stopped", "failed": "failed",
+                 "interrupted": "failed"}
+_SNAPSHOT_PHASE = {"running": "running", "finished": "finished",
+                   "stopped": "stopped", "out_of_credit": "failed",
+                   "halted": "failed", "credit_changed": "failed",
+                   "partial": "finished", "incomplete": "failed"}
+
+
+def run_phase(state, queued=False):
+    """One of RUN_PHASES, from either vocabulary.
+
+    `queued` wins: snapshot() reports state="running" for a run the worker
+    has accepted but not started, because the child it asks about is the
+    one it would have — and "Sweep in progress" over a run that is still
+    waiting is the claim this whole component exists to stop making.
+    """
+    if queued:
+        return "queued"
+    return _WORKER_PHASE.get(state) or _SNAPSHOT_PHASE.get(state) or "running"
+
+
+def run_banner(phase, queue_position=0, found=None, on_results=False):
+    """What the persistent status strip says, or None when it says nothing.
+
+    ONE function for both callers — the server render on every public page
+    and the /progress payload the poll reads — because a strip that
+    re-derived its own wording in JavaScript would drift from the wording
+    the same page was served with, and the drift would show as a flicker on
+    the first poll.
+
+    `found` is only ever shown when it is a real count. A free sweep emits
+    no rows until the end (scraper.py calls fetch_free() once), so "0 jobs
+    found so far" would be a fabricated figure on exactly the screen that
+    exists to be trusted about a run nobody can see.
+    """
+    if phase not in RUN_PHASES:
+        return None
+    jobs = None
+    if found:
+        jobs = f"{found} job{'' if found == 1 else 's'}"
+
+    if phase == "queued":
+        if queue_position == 1:
+            detail = "You're next"
+        elif queue_position > 1:
+            detail = f"{queue_position} sweeps ahead"
+        else:
+            detail = "Waiting to start"
+        return {"phase": phase, "kind": "sweep", "tone": "wait",
+                "headline": "Sweep queued",
+                "detail": detail, "cta": "View progress", "to": "running"}
+
+    if phase == "running":
+        return {"phase": phase, "kind": "sweep", "tone": "live",
+                "headline": "Sweep in progress",
+                "detail": (f"{jobs} found so far" if jobs
+                           else "Searching for jobs"),
+                "cta": "View progress", "to": "running"}
+
+    # Terminal. The destination is the jobs, not the progress screen — there
+    # is no progress left to watch — and the strip stands down once the
+    # reader is actually looking at them.
+    if on_results:
+        return None
+    if phase == "finished":
+        return {"phase": phase, "kind": "sweep", "tone": "done",
+                "headline": "Sweep complete",
+                "detail": (f"{jobs} found" if jobs else "Your jobs are ready"),
+                "cta": "View jobs", "to": "results"}
+    if phase == "stopped":
+        return {"phase": phase, "kind": "sweep", "tone": "warn",
+                "headline": "Sweep stopped",
+                "detail": (f"{jobs} found before it stopped" if jobs
+                           else "Everything it found is saved"),
+                "cta": "View jobs", "to": "results"}
+    return {"phase": phase, "kind": "sweep", "tone": "warn",
+            "headline": "Sweep stopped early",
+            "detail": (f"{jobs} found before it stopped" if jobs
+                       else "Everything it found is saved"),
+            "cta": "View jobs", "to": "results"}
+
+
+# The other thing Sweep does for you that outlives the page you started it
+# on. The parse is synchronous — the request that asks the model is the one
+# that blocks — but a gthread worker does not abort a handler when the
+# browser goes away, so the parse finishes and its result lands in the
+# session room either way. What was missing was any way for a LATER request
+# to know one was open, which is why a refresh mid-parse started a second.
+PARSE_PHASES = ("reading", "ready", "failed")
+
+
+def parse_banner(phase, reviewed=False):
+    """The profile half of the activity strip, or None.
+
+    Same shape as run_banner so one component renders either, and the same
+    stand-down rule: "ready" says nothing on the screen it is pointing at.
+
+    `reviewed` widens that rule to the rest of the flow. "Your profile is
+    ready — review profile" is an invitation to go and look, and a visitor
+    who has just come THROUGH the profile screen has looked: repeating it
+    over Search preferences and again over the free/paid choice is the same
+    sentence three times, each one pointing backwards. It stands down once
+    there is nothing left to invite.
+    """
+    if phase == "reading":
+        return {"phase": phase, "kind": "profile", "tone": "live",
+                "headline": "Reading your résumé",
+                "detail": "Sweep is building your job-search profile.",
+                "cta": "View progress", "to": "review"}
+    if phase == "failed":
+        return {"phase": phase, "kind": "profile", "tone": "warn",
+                "headline": "Sweep couldn't read your résumé",
+                "detail": "Nothing was charged.",
+                "cta": "Try again", "to": "upload"}
+    if phase == "ready" and not reviewed:
+        return {"phase": phase, "kind": "profile", "tone": "done",
+                "headline": "Your profile is ready",
+                "detail": "Check what Sweep understood before searching.",
+                "cta": "Review profile", "to": "review"}
+    return None
+
+
+# What is HAPPENING outranks what has finished. A queued or running sweep is
+# the story whatever else is true; after that, a résumé being read or a parse
+# that failed is something the visitor has to act on; a finished sweep and a
+# ready profile are destinations rather than activity, and the sweep is the
+# later one so it wins between them.
+_ACTIVE = ("queued", "running", "reading", "failed")
+
+
+def pick_activity(sweep, parse):
+    """One strip, deterministic, from the two things that can be going on.
+
+    Deliberately not "sweep always wins": a visitor whose sweep finished and
+    who has since uploaded a new résumé is having their résumé read, and
+    "Sweep complete" over that would point at yesterday's news while the
+    thing actually in progress went unmentioned.
+    """
+    if sweep and sweep["phase"] in ("queued", "running"):
+        return sweep
+    if parse and parse["phase"] in _ACTIVE:
+        return parse
+    return sweep or parse
+
+
+def remaining_cost(tiles, rates):
+    """What the searches that have NOT run would cost, at plan rates.
+
+    `rates` are the EFFECTIVE per-search rates the plan was costed at (each
+    already scaled to the depth this sweep runs), so this and the plan total
+    cannot disagree about what a search on a given site costs.
+    """
+    return round(sum(rates.get(t["site"], 0.0)
+                     for t in tiles if t.get("state") != "done"), 4)
+
+
+def cheapest_rate(tiles, rates):
+    """The lowest per-search rate among the searches still outstanding, or
+    None when nothing paid is left to run."""
+    left = [rates.get(t["site"], 0.0) for t in tiles
+            if t.get("state") != "done"]
+    paid = [r for r in left if r > 0]
+    return min(paid) if paid else None
+
+
+def mask_token(token, keep=4):
+    """A token as it may appear on screen: the last few characters only.
+
+    Enough to tell two keys apart and to match one against the Apify
+    console, and not enough to use. The whole value never reaches the page —
+    the remove control posts the .env slot NAME, not the secret.
+    """
+    tail = (token or "")[-keep:] if keep > 0 else ""
+    return "****" + tail
+
+
+def key_pills(tokens, credits=None):
+    """One row per configured key: what to call it, enough of it to tell
+    them apart, what is left on it, and the slot it lives in.
+
+    Numbered by position rather than by slot, because the slots have gaps —
+    deleting APIFY_TOKEN_2 by hand leaves APIFY_TOKEN and APIFY_TOKEN_3, and
+    a list that reads "Token 1, Token 3" invites the question of where Token
+    2 went. The slot name travels along for the hover and for the control
+    that removes it, so the link to .env is never lost.
+    """
+    credits = credits or {}
+    return [{"name": name, "label": f"Token {position}",
+             "tail": mask_token(token), "credit": credits.get(name)}
+            for position, (name, token) in enumerate(tokens, start=1)]
+
+
+def short_places(location, keep=3, over=6):
+    """A location for a results card: a long list of places becomes the first
+    few plus a count ("India, Spain, Brazil and 47 more"). The full text stays
+    in the row and the exports; this is display only."""
+    parts = [p.strip() for p in str(location or "").split(",") if p.strip()]
+    if len(parts) <= over:
+        return location or ""
+    return f"{', '.join(parts[:keep])} and {len(parts) - keep} more"
+
+
+def and_list(items):
+    """"a", "a and b", "a, b and c" — an English list, not "a and b and c"."""
+    items = [str(i) for i in items]
+    if len(items) < 3:
+        return " and ".join(items)
+    return ", ".join(items[:-1]) + " and " + items[-1]
+
+
+# scraper.NO_FOCUS_EVIDENCE: the one caution the engine can raise (AS-2).
+NO_FOCUS_EVIDENCE = "no_focus_evidence"
+
+
+def recommendation_pieces(typed, labels):
+    """The recommendation as the screen draws it: the SAME sentences
+    recommendation_words says, cut into (text, role) pieces so a résumé's name
+    can be set apart without anyone searching a finished sentence for it.
+
+    role is "name" for the résumé the engine leads with, "peer" for each of
+    the résumés of a tie (none of them leads), "other" for a résumé named
+    after the lead, and None for the engine's own words. Joining the texts reproduces recommendation_words exactly; a test
+    holds that for every kind and for names that contain the sentence's own
+    punctuation, parentheses, markup and each other.
+
+    {"caution": [pieces] or None, "suggestion": [[pieces], ...]}, or None when
+    the run made no recommendation. `labels`: {track id: label}.
+    """
+    if "recommendation" not in typed:
+        return None
+    names = [labels[tid] for tid in typed["recommended_tracks"]]
+    lead, rest = names[0], names[1:]
+    are = "is" if len(rest) == 1 else "are"
+    kind = typed["recommendation"]
+
+    def listed(items, role):
+        """and_list, piece by piece: "a", "a and b", "a, b and c"."""
+        out = []
+        for i, item in enumerate(items):
+            if i:
+                out.append((" and " if i == len(items) - 1 else ", ", None))
+            out.append((str(item), role))
+        return out
+
+    if kind == "clear":
+        said = [[("Suggested résumé: ", None), (lead, "name"), (".", None)]]
+    elif kind == "close":
+        said = [[("Suggested résumé: ", None), (lead, "name"), (".", None)],
+                listed(rest, "other") + [(f" {are} close behind.", None)]]
+    elif kind == "tied":
+        said = [listed(names, "peer") + [(" fit equally.", None)]]
+    else:
+        # split. The engine says only that another résumé is suggested too,
+        # never why, so nothing here may say which is "targeted".
+        said = [[(lead, "name"), (" covers more of this posting.", None)],
+                listed(rest, "other") + [(f" {are} also suggested.", None)]]
+    caution = None
+    if typed.get("recommendation_caution") == NO_FOCUS_EVIDENCE:
+        caution = ([("This posting doesn't mention the skills or role your suggested résumé (", None),
+                    (lead, "name"), (") focuses on.", None)] if len(names) == 1 else
+                   [("This posting doesn't mention the skills or role these suggested "
+                     "résumés focus on.", None)])
+    return {"caution": caution, "suggestion": said}
+
+
+def recommendation_words(typed, labels):
+    """What a Multi-Track Results row says about which of the visitor's
+    résumés to use (AS-1), or None when its run made no recommendation.
+
+    Read straight off the engine's own fields (worker_link.multi_row's typed
+    reading): the recommended tracks in the engine's order, its kind, its
+    caution. Nothing is compared or recomputed here. Relative among the
+    visitor's own résumés, and never the engine's codes, a verdict on the job,
+    or a chance of anything. The caution, when there is one, comes FIRST, so
+    the suggestion after it is never read as an endorsement it does not make;
+    absent and "" both say nothing. `labels`: {track id: label}.
+
+    The words are the flat text of recommendation_pieces, which is the one
+    place the sentences are written.
+    """
+    pieces = recommendation_pieces(typed, labels)
+    if pieces is None:
+        return None
+
+    def flat(parts):
+        return "".join(text for text, _role in parts)
+
+    return {"caution": flat(pieces["caution"]) if pieces["caution"] else None,
+            "suggestion": [flat(sentence) for sentence in pieces["suggestion"]]}
+
+
+def posted_age(iso, today=None):
+    """"3d ago" for a posting date, "" when there is not a usable one.
+
+    The results screen offers a "Newest first" sort and then showed no date
+    at all, so the order it produced was unverifiable from the page. This is
+    the smallest thing that fixes that: relative, because the question a
+    shortlist answers is "is this stale", not "what was the date".
+    """
+    from datetime import date
+
+    stamp = _sortable_date(iso)
+    if not stamp:
+        return ""
+    try:
+        when = date.fromisoformat(stamp)
+    except ValueError:
+        return ""
+    days = ((today or date.today()) - when).days
+    if days < 0:
+        # A posting dated in the future is a source's bad data, not a
+        # reason to render "-3d ago".
+        return ""
+    if days == 0:
+        return "today"
+    if days < 7:
+        return f"{days}d ago"
+    if days < 60:
+        return f"{days // 7}w ago"
+    return f"{days // 30}mo ago"
+
+
+def shortlist(all_rows, min_score=0, source="", q="", sort=DEFAULT_SORT):
+    """The rows the results screen is showing, in the order it shows them.
+
+    Shared with the export routes rather than copied into them: a file
+    labelled "Export CSV (128)" has to contain the same 128 rows the screen
+    is displaying, and two copies of this filter would eventually disagree
+    about which ones those are.
+
+    `min_score` None is no floor at all (Multi-Track Results, which hide no
+    row the engine kept, a negative score included); 0 is today's default.
+    """
+    rows = [r for r in all_rows
+            if min_score is None or _as_int(r.get("score")) >= min_score]
+    if source:
+        # On the PLATFORM, not the whole key. The free adapters write
+        # `platform:company`, so an exact match made "Greenhouse" thirty-odd
+        # separate filter options — one per company board — none of which
+        # selected the others. The paid keys carry no colon, so they are
+        # their own platform and match exactly as before.
+        rows = [r for r in rows
+                if (r.get("source_site") or "").split(":")[0] == source]
+    if q:
+        needle = q.lower()
+        rows = [r for r in rows if needle in
+                f"{r.get('title', '')} {r.get('company', '')}".lower()]
+    # Sorted explicitly rather than trusting the CSV's own order — the real
+    # files happen to arrive score-descending today, but that is another
+    # script's undocumented behaviour, not a guarantee.
+    return sort_rows(rows, sort)
+
+
+def sweep_dates(isos, limit=4):
+    """Distinct sweep dates as "26 Aug", newest first, at most `limit`.
+
+    Takes ISO strings so the caller's clock and filesystem stay out of here.
+    Two sweeps on one day are one label: the offer is about which days are on
+    disk, not how many files there are.
+    """
+    from datetime import date
+
+    seen, out = set(), []
+    for iso in isos:
+        if iso in seen:
+            continue
+        seen.add(iso)
+        try:
+            out.append(date.fromisoformat(iso).strftime("%-d %b"))
+        except ValueError:
+            # An unparseable stamp is still a file the merge will read, so it
+            # is counted by the caller — it just cannot be named here.
+            continue
+        if len(out) == limit:
+            break
+    return out
+
+
+def reweighted(derived, terms, weights, dropped, add_raw="", add_weight=""):
+    """`derived` with the posted weight edits applied. Raises _FormError.
+
+    Shared by the review screen and the results screen's re-rank panel, so
+    the two cannot disagree about what a posted weight means.
+
+    The term travels with its weight in the form, so this never has to
+    reproduce a sort order to know which weight is whose — but the two lists
+    must still be the same length. A desync would reassign weights to the
+    wrong terms, silently, on the numbers that decide the ranking; browsers
+    submit in document order, and this fails closed rather than trust that.
+
+    A term with no posted weight keeps the one it has: a form that renders
+    only some of the weights must not zero the rest.
+
+    `add_raw` is comma-separated free text for the skills the model missed —
+    the whole reason the editor is not read-only. Added terms are lowercased,
+    because that is the form the profile stores and scraper matches on, and an
+    added term that is already in the list UPDATES it rather than appearing
+    twice: skill_weights renders into a dict literal, where a duplicate term
+    would silently keep whichever copy was written last.
+
+    Adding a term also UN-DROPS it, by way of the append below rather than a
+    special case: someone who ticks a term for removal and then types it back
+    has said the more specific thing second, and the alternative is their
+    typing doing nothing at all. (This mattered more when the review screen
+    pre-ticked common terms for removal. It no longer does — a low weight is
+    market commonness, not evidence the skill is absent — but a user can
+    still tick and re-type in one pass, and this is still the right reading.)
+    """
+    if len(terms) != len(weights):
+        raise _FormError("The weights didn't come through — reload the page "
+                         "and try again.")
+    edited = {term: _parse_int(raw, 1, 5, f"Weight for {term}")
+              for term, raw in zip(terms, weights)}
+    added = {t.lower(): None for t in _parse_chips(add_raw, "Added skills")}
+    if added:
+        # Only parsed when something was actually added, so an untouched form
+        # cannot fail on the weight beside an empty box.
+        weight = _parse_int(add_weight or 3, 1, 5, "Weight for the added skills")
+        added = {term: weight for term in added}
+    dropped = set(dropped)
+    kept = dict(derived)
+    kept["skill_weights"] = [
+        dict(w, weight=added.get(w["term"], edited.get(w["term"], w["weight"])))
+        for w in derived["skill_weights"] if w["term"] not in dropped]
+    known = {w["term"] for w in kept["skill_weights"]}
+    kept["skill_weights"] += [{"term": term, "weight": weight}
+                              for term, weight in added.items()
+                              if term not in known]
+    return kept
+
+
+def experience_parts(derived):
+    """(whole years, leftover months) for a derivation, or (None, 0).
+
+    `experience_months` is a TOTAL — local_extract writes years * 12 +
+    months, and with_experience below rebuilds it the same way — so every
+    screen that shows experience has to divide it, and three of them were
+    each doing their own `// 12` and `% 12`. A fourth was about to.
+
+    `years_experience` is the fallback and is only ever whole years, which
+    is why it cannot be the primary: a 22-month résumé has
+    years_experience 1, and showing "1 year" for someone with one year and
+    ten months reads as a misparse of exactly the field the review screen
+    exists to let people correct.
+    """
+    months = derived.get("experience_months") if derived else None
+    if months is not None:
+        return months // 12, months % 12
+    years = derived.get("years_experience") if derived else None
+    return years, 0
+
+
+def experience_text(derived):
+    """"1 year 10 months", or None when nothing was read.
+
+    Months are omitted at zero rather than printed as "0 months": a flat
+    two years is two years, and padding it implies a precision the parse
+    did not have.
+    """
+    years, months = experience_parts(derived)
+    if years is None:
+        return None
+    if not years:
+        # Under a year is months, not "0 years 7 months" — and a flat zero
+        # with no months is a real reading (a new graduate), so it still
+        # says something rather than going blank.
+        return (f"{months} month{'' if months == 1 else 's'}" if months
+                else "Less than a year")
+    said = f"{years} year{'' if years == 1 else 's'}"
+    if months:
+        said += f" {months} month{'' if months == 1 else 's'}"
+    return said
+
+
+def with_experience(derived, years_raw, months_raw):
+    """`derived` with the experience the user corrected on the review screen.
+
+    Raises _FormError. Separate from reweighted() because the results
+    screen's re-rank panel posts weights without this field, and a missing
+    field there must leave the number alone rather than reset it to zero.
+
+    Only the whole years reach the profile — render() writes them into
+    SEARCH["experience_years"] (LinkedIn's seniority band) and
+    SETTINGS["max_experience_years"], and both compare against a posting's
+    stated floor, which is always in years. The months are stored for the
+    display that showed them.
+    """
+    if years_raw is None and months_raw is None:
+        return derived
+    # 60 rather than no ceiling: this is a career length, and an unbounded
+    # one reaches config as max_experience_years and silently stops
+    # filtering anything.
+    years = _parse_int(years_raw or 0, 0, 60, "Years of experience")
+    months = _parse_int(months_raw or 0, 0, 11, "Months of experience")
+    # Saved by the person, so no longer the floor the reader left when it
+    # could not check the work history (local_extract.route).
+    out = dict(derived, years_experience=years,
+               experience_months=years * 12 + months)
+    out.pop("experience_unverified", None)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# The applied ledger
+# ---------------------------------------------------------------------------
+#
+# A file of its own, not a column in jobs_combined.csv, because merge_jobs.py
+# and rescore_from_apify.py both TRUNCATE that file in place — a tick stored
+# there would be wiped by the next merge, silently, with nothing on screen to
+# say it had been. Nor app.state, which is gone on restart.
+#
+# Same shape and same reasoning as the engine's seen.tsv (scraper.py:1180): a
+# few hundred lines a year, keyed on scraper._seen_key, which is the identity
+# dedupe already uses — so a tick survives a re-score, a merge, and a fresh
+# sweep that re-fetches the same posting under a new row.
+#
+# Rewritten rather than appended, because unticking has to remove a line.
+APPLIED_FILE = "applied.tsv"
+
+# The key arrives from the browser, and a tab or a newline in it would forge
+# extra columns or extra rows in the ledger. Scrubbed rather than rejected:
+# the same treatment record_seen gives every field it writes.
+_TSV_BREAK = re.compile(r"[\t\r\n]+")
+
+
+def _tsv(value):
+    return _TSV_BREAK.sub(" ", str(value if value is not None else "")).strip()
+
+
+def applied_path(output_dir, profile):
+    return os.path.join(output_dir, profile, APPLIED_FILE)
+
+
+def read_applied(path):
+    """The keys ticked as applied. A missing ledger is an empty set, never an
+    error — no one has ticked anything yet is the normal first state."""
+    if not os.path.exists(path):
+        return set()
+    keys = set()
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) >= 2 and parts[1]:
+                keys.add(parts[1])
+    return keys
+
+
+def set_applied(path, key, on, title="", company="", today=None):
+    """Tick or untick one job. Returns the keys applied afterwards.
+
+    The title and company ride along so the ledger is readable on its own —
+    a file of bare hashes tells whoever opens it nothing, and this one
+    outlives the output files it refers to.
+    """
+    key = _tsv(key)
+    if not key:
+        return read_applied(path)
+    kept = []
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                line = line.rstrip("\n")
+                parts = line.split("\t")
+                if len(parts) >= 2 and parts[1] == key:
+                    continue          # dropped, then re-added below if on
+                if line.strip():
+                    kept.append(line)
+    if on:
+        stamp = today or datetime.date.today().isoformat()
+        kept.append("\t".join(_tsv(v) for v in (stamp, key, title, company)))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        for line in kept:
+            fh.write(line + "\n")
+    return read_applied(path)
+
+
+def paid_sites():
+    """Sites the Configure screen can switch off, in run order.
+
+    Derived from the intersection of config.SITES (what the engine knows how
+    to run) and config.SITE_RATES (what costs money), rather than listed here
+    — a hardcoded list is how rescore_from_apify.py came to miss a key, and a
+    name in one table but not the other would KeyError in make_profile
+    instead of being quietly skipped.
+
+    Free feeds are deliberately absent: switching one off saves nothing, and
+    the panel says so rather than offering a control that cannot move the
+    figure above it.
+    """
+    import config
+    return [s for s in config.SITES if s in config.SITE_RATES]
+
+
+def _configure_overrides(form, current_scope=DEFAULT_SCOPE):
+    """Validate the posted Configure-screen form and map it onto the state
+    keys _prefs() understands. Returns {} for a form with no recognised
+    field (the plain re-plan the estimate route always does). Raises
+    _FormError, with nothing applied yet, on the first invalid field — a
+    partial form must never partially write, since that could widen the
+    sweep on a field the caller thought they hadn't touched.
+
+    `current_scope` is the session's scope as it stands, needed because the
+    locations rule depends on it and a PARTIAL form (which POST /estimate
+    accepts) may carry locations without a scope. The full form always
+    carries both, so this only decides the partial case.
+    """
+    out = {}
+
+    if "scope" in form:
+        scope = form["scope"]
+        if scope not in _SCOPE:
+            raise _FormError("Choose which jobs Sweep should include.")
+        out.update(_SCOPE[scope])
+        # The CHOICE as well as what it expands to. _SCOPE's fields are what
+        # the engine needs; the summary screens need to say which of the
+        # three the user picked, and "Delhi, Gurgaon, Bengaluru, Hyderabad,
+        # Pune, Mumbai" is not how anyone describes having chosen "India".
+        # Ignored by _prefs(), so it reaches no profile and no engine.
+        out["scope"] = scope
+
+    # Locations, when the picker sent any. Applied AFTER the scope above, so
+    # an empty box means "whatever the scope covers" and picking narrows it —
+    # which is what "All locations" means on that control.
+    #
+    # Validated against the verified table, never trusted: an unknown name
+    # reaches LinkedIn as free text, and LinkedIn answers free text with US
+    # results at full price (config.LINKEDIN_GEO_IDS). This is the one field
+    # on the screen where a typo costs money in the wrong currency.
+    if "locations" in form:
+        scope_now = out.get("scope") or current_scope
+        picked = _parse_chips(form["locations"], "Locations")
+        unknown = [p for p in picked if p not in allowed_locations()]
+        if unknown:
+            raise _FormError(
+                f"{unknown[0]!r} is not a location this can search. LinkedIn "
+                "needs a verified geoId for each one, or it silently returns "
+                "United States results and bills for them.")
+        # Locations NARROW the scope; they never widen it. Anything this
+        # scope does not offer is DROPPED, not refused: the client sanitises
+        # on every scope change, so a mismatch here is a stale page, a
+        # forged post, or a no-JS visitor whose hidden field still carries
+        # the last render's picks — and a 400 would strand that last one on
+        # a control they cannot see to correct. What survives is shown back
+        # to them on the very next screen.
+        #
+        # "Remote roles" offers nothing at all, which is the same rule
+        # arriving at its limit. Letting a city narrow it was the most
+        # expensive bug on this screen: the picker replaced ["Remote"] with
+        # ["Bengaluru"], LinkedIn lost f_WT=2, and the sweep paid for onsite
+        # rows that finalize() then threw away for not being remote. The
+        # screen hides the picker while remote is chosen; this is the half
+        # that holds when the screen is not there.
+        #
+        # REMOTE itself is dropped as a non-place either way, so a stale post
+        # cannot turn an arrangement into a geography.
+        offered = allowed_locations(scope_now)
+        places = [p for p in picked if p != REMOTE and p in offered]
+        if places:
+            # linkedin_locations too: SITES[site].get("locations", ...) means
+            # the most expensive site keeps config.py's default otherwise.
+            out["locations"] = places
+            out["linkedin_locations"] = places
+            # And the free half. Paid retrieval is constrained at the source
+            # by geoId and Indeed country; free sources have no location
+            # parameter at all, so they are narrowed by matching the
+            # posting's own location text against this vocabulary.
+            out["location_hints"] = _hints_for(places)
+        else:
+            # An empty picker means "everywhere this scope covers" — so it
+            # must restore the scope's own three, not leave an earlier pick
+            # standing. setdefault, so a scope posted in the SAME form wins.
+            for key in ("locations", "linkedin_locations", "location_hints"):
+                out.setdefault(key, _SCOPE[scope_now][key])
+
+    if "max_age_days" in form:
+        out["max_age_days"] = _parse_int(
+            form["max_age_days"], 1, 365, "Freshness window")
+
+    # Both are plain text/number inputs that live in the same <form> as every
+    # other control, so an unrelated change elsewhere in the form resubmits
+    # them too, blank, every time — not just on their own change event.
+    # Blank has to mean "no opinion this round", the same as absent, or the
+    # very first click anywhere on the screen would 400.
+    if form.get("max_results"):
+        out["max_results"] = _parse_int(
+            form["max_results"], 1, 200, "Results per search")
+
+    # A pay floor and "keep listings with no stated pay" are not a choice the
+    # engine offers: comp_ok() returns True whenever the pay is unstated
+    # (scraper.py, `return True if top is None else top >= min_usd`), so
+    # unstated rows survive a floor unconditionally. The screen used to carry
+    # a checkbox for it, default on, whose only real effect was to discard
+    # whatever floor the user had just typed. The floor now always applies,
+    # and the copy states what actually happens to unstated pay.
+    if "min_comp_usd" in form:
+        raw = str(form["min_comp_usd"]).strip()
+        # Blank means "no floor", which is a legitimate choice, not an error.
+        out["min_comp_usd"] = (
+            _parse_int(raw, 0, 100_000_000, "Minimum pay") if raw else None)
+
+    # The avoid-list is AUTHORITATIVE, not additive: what the box holds is
+    # what applies. It used to be `if form.get(...)`, i.e. blank means "no
+    # opinion", and the terms were appended into the derivation's own
+    # penalty_terms — so a term could be added and never taken back, by
+    # anyone, ever, while the box rendered empty. It lives in prefs now
+    # (state["avoid"], which make_profile.render already had a contract for),
+    # separate from the model's penalties, which is what makes it removable.
+    if "avoid" in form:
+        terms = _parse_chips(form["avoid"], "Words to rank lower")
+        if len(terms) > MAX_AVOID_TERMS:
+            raise _FormError(
+                f"That is {len(terms)} terms to rank lower — "
+                f"{MAX_AVOID_TERMS} is the most this box takes. Keep the ones "
+                f"that matter most.")
+        out["avoid"] = terms
+
+    # One name per site, never a checkbox GROUP sharing a name: /estimate
+    # posts Object.fromEntries(new FormData(form)), which keeps only the LAST
+    # value of a repeated key — three boxes named "site" would arrive as one
+    # and silently switch the other two off. The hidden marker separates "the
+    # panel was on screen and the user unchecked everything" from "this form
+    # doesn't carry sources at all", which an absent checkbox cannot do.
+    if form.get("sites_present"):
+        out["sites_enabled"] = {site: bool(form.get(f"site_{site}"))
+                                for site in paid_sites()}
+
+    return out
+
+
+# Keys are exactly what linkedin_shortlist.bucket() returns, so an unknown
+# bucket raises here rather than silently dropping paid rows off a page that
+# still looks complete.
+SECTIONS = [
+    ("india", "Onsite and hybrid in India",
+     "Where you already have the right to work. Includes remote roles that "
+     "are geo-locked to India, since those are reachable from here too."),
+    ("remote", "Fully remote",
+     "The posting states worldwide or unqualified remote, so there is no "
+     "visa question to answer."),
+    ("abroad", "Onsite abroad — needs a visa",
+     "Kept and labelled rather than dropped. Each of these needs sponsorship "
+     "or an existing right to work in that country, and it includes remote "
+     "roles geo-locked to somewhere you are not."),
+]
+
+
+def bucket_rows(rows):
+    """Split rows by whether the person can actually take the job.
+
+    Delegates to linkedin_shortlist.bucket(), which reads remote_scope and the
+    location/remote_regions text. This screen must NOT invent a fourth rule:
+    the one it shipped with split on `visa` and `remote?` instead, and over
+    1607 real paid rows that filed 1046 onsite-abroad jobs under "you can work
+    here now", 170 geo-locked rows under "genuinely remote from anywhere", and
+    91 explicit sponsorship REFUSALS under "needs visa sponsorship" — the
+    inverse of that label, because `visa` is "no" when the posting refuses
+    (enrich.visa) and "" in the common case where it never says.
+
+    Sponsorship-shaped rows are left where bucket() puts them: `visa` answers
+    a different question from "can this person work there", and the sweep
+    already drops explicit refusals when SETTINGS["drop_no_visa"] is on.
+    """
+    buckets = {key: [] for key, _heading, _note in SECTIONS}
+    for row in rows:
+        buckets[linkedin_shortlist.bucket(row)].append(row)
+    return buckets
+
+
+def _as_int(value):
+    """Scores arrive from CSV as text and can be blank or non-numeric."""
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def worst_filter(all_rows, min_score, source, q):
+    """Which single active filter would remove the most rows alone, and how
+    many. Returns (name, count), or None when no filter is active.
+
+    Applied one at a time against the UNFILTERED set — with three filters
+    combined, a hardcoded guess at which one is "the" culprit can be simply
+    false.
+    """
+    removed = {}
+    if min_score:
+        removed["minimum score"] = sum(
+            1 for r in all_rows if _as_int(r.get("score")) < min_score)
+    if source:
+        removed["source"] = sum(
+            1 for r in all_rows if r.get("source_site") != source)
+    if q:
+        needle = q.lower()
+        removed["search text"] = sum(
+            1 for r in all_rows
+            if needle not in f"{r.get('title', '')} {r.get('company', '')}".lower())
+    # A filter that removed nothing is not the culprit. With no shortlist on
+    # disk yet, every branch counts 0 and max() would still name one — telling
+    # the user "the minimum score filter removed the most — 0 of 0" and
+    # pointing them at the wrong remedy.
+    if not removed or max(removed.values()) == 0:
+        return None
+    name = max(removed, key=removed.get)
+    return name, removed[name]
+
+
+
+def fill_pct(spend, cap):
+    """How much of the connected credit a figure represents, 0-100.
+
+    The meter bar and the cap marker at left:100% are the only thing on the
+    page that shows PROXIMITY to the limit rather than an absolute figure, so
+    it has to be a real number — it was hardcoded to 0% on every screen.
+    Clamped at 100 because a plan can exceed the credit, and the bar turning
+    red (.meter.over) is what says so, not a bar overflowing its track.
+    """
+    if spend is None or cap is None:
+        return 0
+    if cap <= 0:
+        # A real zero-credit account. Anything at all is "all of it".
+        return 100 if spend > 0 else 0
+    return min(100, round(spend / cap * 100))
+
+
+# What the review screen calls each importance tier. The engine's names are
+# contracts; these are sentences a person reads about their own résumé.
+#
+# Deliberately about EVIDENCE, never about worth: "Listed only" says what
+# the page shows, where the old "Low signal" said what the market thinks
+# and read as a verdict on the person. The market still gets its own badge
+# beside this one, because they are two facts and the whole point of the
+# tier is that they stopped being one.
+TIER_LABELS = {
+    "CORE": ("Used at work", "core"),
+    "STRONG_SECONDARY": ("Built with", "strong"),
+    "SUPPORTING": ("Listed", "support"),
+    "BACKGROUND": ("Background", "low"),
+}
+
+
+def importance_badges(derived):
+    """{term: {label, css, why}} for the weight editor, or {} when the
+    parse carries no importance — every caller degrades to the old screen
+    by rendering nothing."""
+    rows = (derived or {}).get("skill_importance") or []
+    if not rows:
+        return {}
+    try:
+        import skill_concepts
+    except ImportError:          # pragma: no cover - repo root not on path
+        return {}
+    by_id = {}
+    for row in rows:
+        label, css = TIER_LABELS.get(row.get("tier"), (None, None))
+        if label:
+            by_id[row["id"]] = {"label": label, "css": css,
+                                "why": row.get("why") or label}
+    # Keyed by the TERM the form posts, not the concept id: the editor
+    # still edits spellings, and several of them can share one badge.
+    out = {}
+    for entry in (derived or {}).get("skill_weights") or []:
+        badge = by_id.get(skill_concepts.resolve(entry.get("term", "")))
+        if badge:
+            out[entry["term"]] = badge
+    return out

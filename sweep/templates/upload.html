@@ -1,0 +1,464 @@
+{% extends "base.html" %}
+{% from "_resumes.html" import cut_name %}
+{% from "_a.html" import peek %}
+{% block title %}Sweep — metered job search{% endblock %}
+
+{#- A state said in words, with the shape that goes with it (the review
+   screen's own: a ring, a half disc, a dot, a tick, a "!", a dash). The words
+   are the résumé setup's, not the review screen's queue: here a résumé that
+   has not been read is "Not read yet", because nothing on this page reads it. #}
+{% macro state_of(t) -%}
+  {%- if not t.selected %}out|Left out
+  {%- elif t.status == 'ready' %}reviewed|Reviewed
+  {%- elif t.status == 'review' %}ready|Ready to review
+  {%- elif t.status == 'reading' %}reading|Reading now
+  {%- elif t.status == 'failed' %}failed|Couldn't finish
+  {%- else %}waiting|Not read yet{% endif %}
+{%- endmacro %}
+
+{% block body %}
+<div class="stack">
+  {# The front door, and the résumés once there are some. Two audiences, two
+     propositions: metering is what the OPERATOR built this for and is the
+     right first sentence for them; a job seeker came to find jobs, and the
+     landing screen has to say so before it says anything about cost. One
+     heading and one sentence say what this is; the mark is in the header on
+     every screen and is not printed a second time here. No timed splash: this
+     is ready immediately, so a delay would be friction on every run. #}
+  <div class="stack-tight{{ ' hero' if public_mode and not tracks }}">
+    {% if tracks %}
+    <h1>Your résumés</h1>
+    <p class="lede">{{ tracks|length }} of {{ max_tracks }} added. Sweep searches
+      for every résumé that is in this search, in the order below, together.</p>
+    {% elif public_mode %}
+    {#- Direction A's front door: one pill, one line that says the whole trick, one sentence. The
+       form below is the screen's one job, and the desk beside it shows what "ranks" means. #}
+    <span class="eyebrow">Step 1 · your résumé</span>
+    <h1>Messy job boards in. A <span class="hl">tidy shortlist</span> out.</h1>
+    <p class="lede">Drop in your résumé. Sweep works out what to look for, then ranks what it finds.</p>
+    {% else %}
+    <h1>Sweep</h1>
+    <p class="lede">Job search you can meter. It prices every search before it
+      runs, and spends nothing until you approve the plan.</p>
+    {% endif %}
+  </div>
+
+  {% if error %}<p class="error">{{ error }}</p>{% endif %}
+  {#- A batch upload's files that were not added, each by name (and how many
+     were), escaped like everything else here. #}
+  {%- if problems %}
+  <div class="error" role="alert"><ul class="problems">
+    {%- for line in problems %}<li>{{ line }}</li>{% endfor %}</ul></div>
+  {%- endif %}
+
+  {#- Room for more than one résumé: the picker takes several at once
+     (pick.js). With the setup off, or one place left, it is the one-file
+     picker, byte for byte. #}
+  {%- set many = tracks is not none and max_tracks - tracks|length > 1 %}
+  {%- set room = tracks is none or tracks|length < max_tracks %}
+  {#- Public only. `fresh`: nothing added yet, so the rail carries the brush desk and the three steps close the
+     page. `solo`: a list of résumés, where the rail is the desk alone (its facts are the peeks under the form).
+     The console is neither. #}
+  {%- set fresh = public_mode and not tracks %}
+  {%- set solo = public_mode and tracks %}
+
+  <div class="split upload{{ ' fresh' if fresh }}{{ ' solo' if solo }}">
+    <div class="stack">
+      {#- The 1-3 résumé setup (P4-U1), only while it is on: `tracks` is None
+         otherwise, and this screen is exactly the one-résumé front door. Every
+         résumé is a ruled row of plain forms — no script, no drag — each
+         posting its own server-made id. A row is headed by the name the
+         visitor can change, with the file it came from under it; until they
+         have named it the name is only the placeholder "Résumé N", which says
+         less than the file does, so the file stands in for it (the review
+         screen does the same). State is a shape and a word, never colour
+         alone. Whitespace-trimmed, so with the setup off not one byte changes. #}
+      {%- if tracks %}
+      <section>
+        <ol class="ledger manage" aria-label="Your résumés, in the order they are searched">
+          {% for t in tracks %}
+          {%- set placeholder = t.label.startswith('Résumé ') and t.label[7:].isdigit() %}
+          {%- set as_file = placeholder and t.file %}
+          {%- set st = state_of(t)|trim %}
+          {#- A refused rename comes back to this same screen, so its row opens
+             on the name that was typed (this is the request that just failed,
+             not state: nothing was saved). #}
+          {%- set refused = request.form.get('do') == 'rename' and request.form.get('track') == t.id %}
+          <li class="resume" aria-labelledby="resume-{{ t.n }}">
+            <div class="resume-head">
+              <span class="rank" aria-hidden="true">{{ '%02d'|format(t.n) }}</span>
+              <div class="resume-id">
+                <div class="name-line">
+                  <h2 id="resume-{{ t.n }}"{% if as_file %} class="is-file" title="{{ t.file }}"{% endif %}><span
+                      class="visually-hidden">Résumé {{ t.n }}: </span>{% if as_file %}{{ cut_name(t.file) }}{% else %}{{ t.label }}{% endif %}</h2>
+                  {# A door, so it works without a script: the field is in the page
+                     either way and opens under the name it renames. #}
+                  <details class="rename"{{ ' open' if refused }}>
+                    <summary>Rename<span class="visually-hidden"> résumé {{ t.n }}</span></summary>
+                    <form method="post" action="{{ url_for('track_action') }}" class="row">
+                      <input type="hidden" name="track" value="{{ t.id }}">
+                      <label><span class="label">Name for résumé {{ t.n }}</span>
+                        <input name="name" value="{{ request.form.get('name') if refused else t.label }}" maxlength="40" required{% if refused %} aria-invalid="true"{% endif %}></label>
+                      <button class="secondary" type="submit" name="do" value="rename">Save name</button>
+                    </form>
+                  </details>
+                </div>
+                {%- if t.file and not as_file %}
+                <p class="file" title="{{ t.file }}">{{ cut_name(t.file) }}</p>
+                {%- endif %}
+              </div>
+              <span class="status {{ st.split('|')[0] }}">{{ st.split('|')[1] }}</span>
+            </div>
+            <div class="resume-body">
+              {%- if not t.selected %}
+              <p class="muted">Not in this search.</p>
+              {%- endif %}
+              {#- Review is the one action that moves a résumé on, so it is the
+                 outline until the résumé is reviewed; then it is Edit, a word,
+                 as on the review screen. Leaving it out, moving it and removing
+                 it are words, and Remove is set apart at the far end in the
+                 error colour so it is never the word beside the one you meant. #}
+              <form method="post" action="{{ url_for('track_action') }}" class="row-actions">
+                <input type="hidden" name="track" value="{{ t.id }}">
+                <span class="a-main">
+                  {%- if not t.selected %}
+                  <button class="secondary" type="submit" name="do" value="select">Include<span
+                      class="visually-hidden"> {{ t.label }}</span></button>
+                  {%- elif t.status == 'ready' %}
+                  <a class="tertiary" href="{{ url_for('review', track=t.id) }}">Edit<span
+                      class="visually-hidden"> {{ t.label }}</span></a>
+                  {%- else %}
+                  <a class="secondary" href="{{ url_for('review', track=t.id) }}">Review<span
+                      class="visually-hidden"> {{ t.label }}</span></a>
+                  {%- endif %}
+                </span>
+                {#- In or out of the search sits beside the first action, not after
+                   the moves, so it is in the same place on every row. #}
+                <span class="a-state">
+                  {%- if t.selected %}
+                  <button class="tertiary" type="submit" name="do" value="deselect">Leave out<span
+                      class="visually-hidden"> {{ t.label }}</span></button>
+                  {%- else %}
+                  <a class="tertiary" href="{{ url_for('review', track=t.id) }}">Review<span
+                      class="visually-hidden"> {{ t.label }}</span></a>
+                  {%- endif %}
+                </span>
+                <span class="a-arrange">
+                  {%- if not loop.first %}<button class="tertiary" type="submit" name="do"
+                          value="up">Move up<span class="visually-hidden"> {{ t.label }}</span></button>{% endif %}
+                  {%- if not loop.last %}<button class="tertiary" type="submit" name="do"
+                          value="down">Move down<span class="visually-hidden"> {{ t.label }}</span></button>{% endif %}
+                </span>
+                <span class="a-danger">
+                  <button class="tertiary danger" type="submit" name="do" value="remove">Remove<span
+                      class="visually-hidden"> {{ t.label }}</span></button>
+                </span>
+              </form>
+            </div>
+          </li>
+          {% endfor %}
+        </ol>
+        <div class="actionbar">
+          {% if setup_ready %}
+          <div class="actions">
+            <a class="primary" href="{{ url_for('key') }}">Continue to job search<span
+                class="go" aria-hidden="true">&rarr;</span></a>
+          </div>
+          {% else %}
+          <p class="muted">To search, include at least one résumé and review every
+            résumé that is in this search.</p>
+          {% endif %}
+        </div>
+      </section>
+      {%- endif %}
+
+      {% if room %}
+      <div class="add{{ ' after' if tracks }}">
+        {#- What goes here, said once: the heading names the capacity that is
+           left, the sentence says what happens to each. #}
+        <div class="stack-tight">
+          {% if tracks is none and public_mode %}
+          <h2>Start with your résumé</h2>
+          <p class="muted">Everything Sweep searches for comes from it, so this is
+            the only thing you have to provide.</p>
+          {% elif tracks is none %}
+          <h2>Point it at your résumé</h2>
+          <p class="muted">Your résumé decides which jobs get searched for and how they are ranked.</p>
+          {% else %}
+          <h2>{% if not tracks %}Add up to {{ max_tracks }} résumés{% elif max_tracks - tracks|length > 1
+            %}Add up to {{ max_tracks - tracks|length }} more résumés{% else %}Add another résumé{% endif %}</h2>
+          <p class="muted">Each one is read on its own, and you review each one
+            before anything is searched.</p>
+          {% endif %}
+        </div>
+        {% if many %}<script src="{{ url_for('static', filename='pick.js') }}"></script>{% endif %}
+        {# The wait after this click is the longest in the app and none of it is
+           visible: POST /resume redirects to /review, and /review's render is
+           what calls the model. The old page stays on screen throughout, so the
+           note beside the button covers the whole gap — and the disabled button
+           stops a second submit paying for a second model call. #}
+        <form class="upload-form" method="post" action="{{ url_for('resume') }}"{% if public_mode %} data-going="splash"{% endif %}
+              enctype="multipart/form-data"
+              {% if many %}x-data="sweepPicker({{ max_tracks - tracks|length }}, {{ '%g'|format(max_mb) }})"{% else %}x-data="{ sent: false, over: false, file: null, bad: '',
+                        take() {
+                          const f = this.$refs.picker.files[0];
+                          this.bad = ''; this.file = null;
+                          if (!f) return;
+                          if (!/\.pdf$/i.test(f.name)) {
+                            this.bad = f.name + ' is not a PDF. Export your résumé as a PDF and try again.';
+                          } else if (f.size > {{ '%g'|format(max_mb) }} * 1048576) {
+                            this.bad = f.name + ' is larger than {{ '%g'|format(max_mb) }} MB. Export a smaller PDF and try again.';
+                          }
+                          if (this.bad) { this.$refs.picker.value = ''; return; }
+                          this.file = { name: f.name, size: f.size < 1048576
+                            ? Math.max(1, Math.round(f.size / 1024)) + ' KB'
+                            : (f.size / 1048576).toFixed(1) + ' MB' };
+                        },
+                        drop(e) {
+                          this.over = false;
+                          this.$refs.picker.files = e.dataTransfer.files;
+                          this.take();
+                        } }"{% endif %}
+              @submit="sent = true">
+          {# The whole box is the control: a label wrapping the input gives
+             click-to-browse with no script at all, so the only part that needs
+             Alpine is the drop. It is the one thing on the screen with a dashed
+             edge. Once something is chosen it shrinks to a line that offers
+             what is left, and with no place left it is not drawn (the input
+             stays in the form, holding exactly the list on screen). #}
+          <label class="drop" :class="{ over: over{% if many %}, compact: files.length{% endif %} }"
+                 {% if many %}x-show="files.length < room"{% else %}x-show="!file"{% endif %}
+                 @dragover.prevent="over = true"
+                 @dragleave.prevent="over = false"
+                 @drop.prevent="drop($event)">
+            <input type="file" name="resume" accept="application/pdf"{% if many %} multiple{% endif %}
+                   x-ref="picker" @change="take()">
+            <svg class="glyph" width="30" height="30" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"
+                 aria-hidden="true" focusable="false">
+              <path d="M14 3H7a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V7z"/>
+              <path d="M14 3v4h4"/>
+            </svg>
+            <strong{% if many %} x-text="files.length ? 'Add another PDF — ' + (room - files.length) + ' more fit' : 'Drop up to ' + room + ' résumés here, or click to choose PDFs'"{% endif %}>{% if many %}Drop up to {{ max_tracks - tracks|length }} résumés here, or click to choose PDFs{% else %}Drop your résumé here, or click to choose a PDF{% endif %}</strong>
+            {# The limit is injected into the app, so it is read from there rather
+               than named in this copy — a template that says 15 MB beside a
+               1 MB app is a page telling the user the wrong thing. #}
+            <span class="meta">{% if many %}PDFs only, up to {{ '%g'|format(max_mb) }} MB in total.{% else %}PDF only, up to {{ '%g'|format(max_mb) }} MB.{% endif %}
+              {%- if not public_mode %}
+              A scanned image with no text layer will not work.{% endif %}</span>
+          </label>
+
+          {# Rejected before the upload, not after it: the server still enforces
+             both limits, but a 15 MB round trip to be told the size is a worse
+             way to learn it. #}
+          <p class="error" x-show="bad" x-cloak x-text="bad" role="alert"></p>
+
+          {% if many %}{# Every file that will be sent, in the order it will be read,
+             each with its own way out; text, so a screen reader hears it. #}
+          <div class="picked" x-show="files.length" x-cloak>
+            <h3>Selected résumés</h3>
+            <ul class="picked-list" aria-label="Résumés to read">
+              <template x-for="f in files" :key="f.name + '/' + f.size + '/' + f.lastModified">
+                <li class="picked-row">
+                  <span class="pick-name" x-text="f.name"></span>
+                  <span class="meta" x-text="size(f)"></span>
+                  <button class="tertiary" type="button" @click="remove(files.indexOf(f))"
+                          :aria-label="'Remove ' + f.name">Remove</button>
+                </li>
+              </template>
+            </ul>
+          </div>
+          {% else %}<div class="picked" x-show="file" x-cloak>
+            <ul class="picked-list">
+              <li class="picked-row">
+                <span class="pick-name" x-text="file &amp;&amp; file.name"></span>
+                <span class="meta" x-text="file &amp;&amp; file.size"></span>
+                <button class="tertiary" type="button" @click="$refs.picker.click()">Replace file</button>
+              </li>
+            </ul>
+          </div>{% endif %}
+
+          <div class="upload-foot">
+            {#- Public single résumé: nothing to say beside the button (the free-note is a peek now). #}
+            {%- if many or not public_mode %}
+            <div class="upload-note">
+              {% if many %}<p class="meta" x-show="files.length" x-cloak aria-live="polite"
+                 x-text="files.length + ' of ' + room + ' selected.'
+                         + (files.length < room ? ' You can add ' + (room - files.length) + ' more.' : ' Remove one to add another.')"></p>{% endif %}
+              {% if public_mode %}
+              {# the "Is it free?" peek, under the form #}
+              {% else %}
+              <p class="free-note"><b>Nothing is charged yet.</b> Your résumé is sent to
+                a model to derive your search terms. No scraping credit is spent until
+                you approve the plan.</p>
+              {% endif %}
+            </div>
+            {%- endif %}
+            <div class="actions">
+              <span class="meta sending" x-show="sent" x-cloak{% if many
+                %} x-text="'Reading your résumé' + (files.length > 1 ? 's' : '') + ' — this takes a few seconds.'"{%
+                endif %}>Reading your résumé —
+                this takes a few seconds.</span>
+              {#- The page's one primary is the way on when there is one: with a
+                 ready setup it is Continue, and adding another résumé is the
+                 outline beside it. #}
+              <button class="{{ 'secondary' if setup_ready else 'primary' }}" type="submit" :disabled="sent"{% if many
+                %} x-text="files.length > 1 ? 'Read ' + files.length + ' résumés' : 'Read my résumé'"{%
+                endif %}>Read my résumé</button>
+            </div>
+          </div>
+        </form>
+        {%- if public_mode %}
+        {#- The three questions a visitor stops to ask before handing over a CV, answered where they ask them. Native
+           <details>, so they work without a script. #}
+        <div class="peeks">
+          {%- call peek("Is it free?", "Yes") %}
+          <p>Reading your résumé spends no credit. Sweep reads it with an AI model to work out what to search for.</p>
+          <p>A Quick Sweep is free too. A Deep Sweep adds LinkedIn, Indeed and Naukri through your own Apify account, which bills per search. Apify’s free plan includes $5 in monthly credits, with no card required; actual search usage varies.</p>
+          {%- endcall %}
+          {%- call peek("Is my résumé kept?", "No") %}
+          <p>Your résumé is read once to work out what to search for. The PDF itself is never saved, and everything Sweep read from it is forgotten within two hours.</p>
+          {%- endcall %}
+          {%- call peek("Why only text PDFs?") %}
+          <p>Sweep reads the words in the file. A scanned image with no text layer has none to read.</p>
+          {%- endcall %}
+        </div>
+        {%- endif %}
+      </div>
+      {% elif tracks is not none %}
+      <p class="muted cap">A search takes up to {{ max_tracks }} résumés. Remove
+        one to add another.</p>
+      {% endif %}
+    </div>
+
+    {# What this screen hands the next one, and what to expect. One rail of
+       ruled notes rather than three panels of equal weight beside the form:
+       what happens next, what it costs, what is kept. Every line is a fact
+       about the engine, not a promise — the free feeds have no switch because
+       turning one off saves nothing, and the paid boards come from SITE_RATES
+       rather than a list typed here. #}
+    {%- if not solo %}
+    <aside class="aside rail" aria-label="What to expect">
+      {# `read` is the CACHED derivation and never a fresh model call, so coming
+         back with a résumé already read shows what the model found instead of
+         claiming nothing has been.
+
+         On a FIRST visit there is nothing to report, and the panel used to
+         render three rows of "not read yet" — an empty table introducing
+         three unfamiliar nouns to someone who has not uploaded anything.
+         It appears only once it has something to say. #}
+      {#- Public, nothing added yet: the desk leads the rail. #}
+      {%- if fresh %}
+      {% include "_desk.html" %}
+      {%- endif %}
+      {% set has_read = read and (read.role_keywords or read.skill_weights
+                                  or read.years_experience is not none) %}
+      {% if has_read or not public_mode %}
+      <section class="rail-block">
+        <h2 class="rail-title">{% if public_mode %}What Sweep read last time{%
+          else %}What the model reads out{% endif %}</h2>
+        <dl class="facts">
+          <div>
+            <dt>{% if public_mode %}Job titles to search{% else %}Titles it will search for{% endif %}</dt>
+            {% if read and read.role_keywords %}
+              <dd>{{ read.role_keywords|length }}</dd>
+            {% else %}<dd class="pending">not read yet</dd>{% endif %}
+          </div>
+          <div>
+            <dt>{% if public_mode %}Skills found{% else %}Skill weights{% endif %}</dt>
+            {% if read and read.skill_weights %}
+              <dd>{{ read.skill_weights|length }}</dd>
+            {% else %}<dd class="pending">not read yet</dd>{% endif %}
+          </div>
+          <div>
+            {# "Years of experience" over a figure that is years AND months
+               is a label narrower than what it labels. #}
+            <dt>Experience</dt>
+            {# experience_text is None when nothing was read, which is the
+               same guard the `read and` used to carry here: with read None,
+               Jinja resolves read.years_experience to Undefined and
+               `Undefined is not none` is TRUE, so this took the "we have a
+               figure" branch and printed an empty <dd> on a screen whose
+               rule is that a figure nobody produced is never printed. #}
+            {% set said = experience_text(read) %}
+            {% if said %}
+              <dd>{{ said }}</dd>
+            {% else %}<dd class="pending">not read yet</dd>{% endif %}
+          </div>
+        </dl>
+        <p class="meta">{% if public_mode %}Uploading a new résumé replaces
+          all of it.{% else %}You correct all three on the next screen, before
+          anything is priced.{% endif %}</p>
+      </section>
+      {% endif %}
+      {#- The rest of the rail is the console's. A public visitor has the same facts as the peeks under the form
+         (is it free, is it kept, why text PDFs) and as the three steps closing the page. #}
+      {%- if not public_mode %}
+      {%- if not tracks %}
+      <section class="rail-block">
+        <h2 class="rail-title">What happens next</h2>
+        {# console copy #}
+        <p class="muted">You check the titles and skill weights it derived, connect
+          your Apify key, and see a costed plan. The sweep starts only when you
+          confirm that plan.</p>
+        {# console copy #}
+      </section>
+      {%- endif %}
+      <section class="rail-block">
+        <h2 class="label free">Free</h2>
+        {# console copy #}
+        <p>Company ATS boards and job feeds are searched on every sweep
+          and cost nothing. There is no switch for them because switching one off
+          would not save a cent.</p>
+        {# console copy #}
+      </section>
+      <section class="rail-block">
+        <h2 class="label paid">Paid, and optional</h2>
+        {# No step number: the journey is renumbered per mode, and prose that
+           names "step 3" is wrong the moment it is. #}
+        <p>{{ paid|join(', ') }} bill per search against your own
+          Apify credit. You choose whether to use them at all — a free sweep
+          needs no key.</p>
+      </section>
+      {# Locally Sweep really does serve this page from the operator's own
+         terminal and write into their folder. (On Render it does neither, and
+         the note used to claim both to every beta visitor; the public page
+         says what is kept in the "Is my résumé kept?" peek.) #}
+      <section class="rail-block">
+        {# console copy #}
+        <h2 class="label">Runs on this machine</h2>
+        <p>Sweep serves this page from your own terminal. Your résumé
+          goes to one model to derive search terms; the plan and the results stay
+          in this folder.</p>
+        {# console copy #}
+      </section>
+      {%- endif %}
+    </aside>
+    {%- else %}
+    {#- A list of résumés: the rail is the brush desk alone (the facts are the peeks under the form), so the wide
+       screen is not half empty when a visitor comes back to add or review one. #}
+    <aside class="aside rail" aria-label="How Sweep ranks">
+      {% include "_desk.html" %}
+    </aside>
+    {%- endif %}
+  </div>
+  {#- The three steps, once, for someone who has not started. #}
+  {%- if fresh %}
+  <ol class="trail3" aria-label="What happens next"><li><span class="k">1</span>We read it</li><li class="arw" aria-hidden="true">→</li><li><span class="k">2</span>You pick how wide</li><li class="arw" aria-hidden="true">→</li><li><span class="k">3</span>We sweep and rank</li></ol>
+  {%- endif %}
+</div>
+{%- if public_mode %}
+{#- What covers the wait between "Read my résumé" and the reading page (going.js, going.css): the upload, then the
+   text read out of the PDF. Says only those two, then that the reading page is opening; the model's own wait is
+   that page's, with its own bar. #}
+<div class="going-splash" data-going-splash role="status" aria-live="polite">
+  <svg class="going-stroke" width="250" height="80" viewBox="0 0 250 80" aria-hidden="true">
+    <path class="going-path" d="M14 52 C 60 30, 110 62, 150 44 S 215 30, 236 40" fill="none" stroke="#B9A6F5" stroke-width="16" stroke-linecap="round" pathLength="100"/>
+    <g class="going-brush"><path d="M50 4 L33 32" stroke="#1E1530" stroke-width="6" stroke-linecap="round"/><path d="M24 27 L42 38 L35 56 C26 59 12 54 7 45 Z" fill="#E4F25C" stroke="#1E1530" stroke-width="3.5" stroke-linejoin="round"/></g>
+  </svg>
+  <h2 data-plural="Reading your résumés" data-one="Reading your résumé">Reading your résumé</h2>
+  <p class="going-say"><span data-say data-plural="Sending your PDFs" data-one="Sending your PDF">Sending your PDF</span><span data-say>Pulling out the text</span><span data-say>Opening the reading page</span></p>
+  <p class="meta">No credit is spent reading.</p>
+</div>
+{%- endif %}
+{% endblock %}

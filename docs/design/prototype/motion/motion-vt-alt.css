@@ -1,0 +1,23 @@
+/* D7A alternative, NOT the proposal: a cross-document view transition for moving between views.
+
+   Loaded after motion-proposed.css by the `proposed-vt` variant. The browser keeps the old list on screen until
+   the new one is ready and crossfades them, which is the smoother picture. It was measured and it loses:
+   while a view transition plays the real page is not hit-testable (a press lands on <html>), so a second tab
+   pressed inside the 160 ms is dropped (D7 note, section 13: the last press shown in 0 or 1 of 10 runs, against
+   7 to 10 of 10 without it), it needs Chromium or Safari 18.2+, and `pointer-events: none` on the overlay does
+   not change it. Every move between views is a transition here, slow or quick. */
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition { navigation: auto; }
+  .swap .results-body { animation: none; }
+  .results-body { view-transition-name: results-body; }
+  nav.views { view-transition-name: results-tabs; }
+  ::view-transition { pointer-events: none; }
+  ::view-transition-old(root), ::view-transition-new(root) { animation: none; mix-blend-mode: normal; }
+  ::view-transition-old(root) { display: none; }
+  ::view-transition-group(results-body), ::view-transition-group(results-tabs) { animation-duration: var(--ms-2); }
+  ::view-transition-old(results-body), ::view-transition-new(results-body),
+  ::view-transition-old(results-tabs), ::view-transition-new(results-tabs) {
+    animation-duration: var(--ms-2); animation-timing-function: var(--ease-settle);
+  }
+  ::view-transition-old(results-body), ::view-transition-new(results-body) { height: auto; }
+}

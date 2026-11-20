@@ -1,0 +1,61 @@
+{# What Sweep is about to do, in the user's own terms.
+
+   One macro because three screens need the same four facts and none of them
+   had all four: /configure priced a plan without naming what it searched for,
+   /confirm answered "what will this cost" and never "what is about to
+   happen", and /running reported searches without saying what for. The
+   single most likely thing to be wrong — the job titles — was not on the
+   last screen before a long, sometimes paid, commitment.
+
+   Everything here is read from state the routes already hold: role_keywords
+   from the derivation, locations from the prefs the form posted, sources
+   from the costed plan. Nothing is computed twice. #}
+{% macro search_summary(roles, scope_label, locations, paid_labels,
+                        free_sources, depth=none, compact=false, ruled=false,
+                        roles_label='Searching for') -%}
+<dl class="summary{{ ' compact' if compact }}{{ ' ruled' if ruled }}">
+  <div>
+    <dt>{{ roles_label }}</dt>
+    <dd>
+      {%- if roles and ruled %}<span class="roles">{{ roles|join(' · ') }}</span>
+      {%- elif roles %}{% for r in roles %}<span class="tag">{{ r }}</span>{% endfor %}
+      {%- else %}<span class="pending">no job titles</span>{% endif -%}
+    </dd>
+  </div>
+  {# The scope ALWAYS, and the locations after it when the picker narrowed
+     things. It used to be one or the other, so "Onsite or hybrid, in India"
+     plus a city printed only the city and dropped the half of the answer
+     that says which jobs are included at all. #}
+  <div>
+    <dt>Where</dt>
+    <dd>
+      {%- if scope_label %}<span class="tag">{{ scope_label }}</span>{% endif -%}
+      {%- if locations %}{% for l in locations %}<span class="tag">{{ l }}</span>{% endfor %}
+      {%- elif not scope_label %}<span class="pending">everywhere</span>{% endif -%}
+    </dd>
+  </div>
+  {# Retrieval depth, and only where it means something. A free sweep runs
+     no per-query searches — it reads whole company boards and fixed feeds —
+     so the caller passes none and this row is absent rather than quoting a
+     number nothing there reads. #}
+  {% if depth %}
+  <div>
+    <dt>Per search</dt>
+    <dd><span class="tag">{{ depth }} jobs</span></dd>
+  </div>
+  {% endif %}
+  <div>
+    <dt>Sources</dt>
+    <dd>
+      {%- for p in paid_labels %}<span class="tag paid-tag">{{ p }}</span>{% endfor -%}
+      {# The free half is a COUNT, not a list: it is six to a dozen boards
+         whose names mean nothing to a job seeker, and naming them all would
+         make the row that matters — the paid ones they are paying for — the
+         hardest to find. #}
+      {%- if free_sources %}<span class="tag free-tag">{{ free_sources }} free
+        job board{{ '' if free_sources == 1 else 's' }}</span>
+      {%- else %}<span class="tag free-tag">Free job boards</span>{% endif -%}
+    </dd>
+  </div>
+</dl>
+{%- endmacro %}

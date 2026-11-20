@@ -1,0 +1,31 @@
+{# Direction A's small parts for public pages (styled in static/sweep-a.css, scoped to .skin-a).
+   Nothing here is console markup: import them only inside a public_mode branch.
+
+     {% from "_a.html" import peek, tip, stamp, mbar, brush %}
+     {% call peek("Label", "aside") %}…{% endcall %}   a native <details>, no JS
+     {{ tip("id", "Say something short.") }}            dismissible with tips.js; stays put without JS
+     {{ stamp("Free") }}
+     {{ brush(30) }}                                    the brush drawing (tip's face, Progress's rider)
+     {% call mbar() %}…{% endcall %}                    the phone's sticky action bar #}
+
+{% macro peek(label, aside='') -%}
+<details class="peek"><summary><span class="peek-label">{{ label }}</span>{% if aside %}<span class="peek-aside{% if aside in ('Yes', 'No') %} {{ aside|lower }}{% endif %}">{{ aside }}</span>{% endif %}</summary><div class="peek-body">{{ caller() }}</div></details>
+{%- endmacro %}
+
+{# The brush: the drawing the tip's face wears and Progress's rider rides on (ink handle, white bristles). #}
+{% macro brush(size=30) -%}
+<svg width="{{ size }}" height="{{ size }}" viewBox="0 0 36 36" focusable="false"><path d="M25 6 L17 18" fill="none" stroke="var(--a-ink)" stroke-width="3" stroke-linecap="round"/><path d="M12 16 L22 22 L18 30 C13 31 8 28 6 24 Z" fill="#FFFFFF" stroke="var(--a-ink)" stroke-width="2" stroke-linejoin="round"/></svg>
+{%- endmacro %}
+
+{# The dismiss button ships `hidden`: tips.js reveals it, so a visitor without JS never sees a button that does nothing. #}
+{% macro tip(id, text) -%}
+<aside class="tip" data-tip="{{ id }}" aria-label="Tip"><span class="tip-face" aria-hidden="true">{{ brush(30) }}</span><p class="tip-say">{{ text }}</p><button type="button" class="tip-x" data-tip-dismiss aria-label="Dismiss tip" hidden>&times;</button></aside>
+{%- endmacro %}
+
+{% macro stamp(text) -%}
+<span class="stamp">{{ text }}</span>
+{%- endmacro %}
+
+{% macro mbar() -%}
+<div class="mbar">{{ caller() }}</div>
+{%- endmacro %}

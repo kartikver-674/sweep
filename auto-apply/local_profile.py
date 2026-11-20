@@ -1,0 +1,530 @@
+"""A profile from a résumé with no API key: local model, then Python.
+
+The Gemini-free half of auto-apply/make_profile.py. It returns the SAME
+dict `_generate_one` returns, so everything downstream — widen_skills,
+reweight_from_corpus, render(), Sweep's review screen — is unchanged and
+does not know which engine produced it.
+
+    generate(resume_text, prefs)    -> the profile dict
+    Escalated                       -> raised when the local parse fails
+                                       a check and Gemini should be asked
+
+WHAT IS LOCAL AND WHAT IS NOT
+-----------------------------
+Two calls to a model on the user's own machine read the résumé
+(local_extract). Everything after that is arithmetic and measurement
+against the jobs already in output/ (local_search). Nothing leaves the
+machine.
+
+  candidate_name      local model, then checked against the document
+  years_experience    COMPUTED from the extracted dates — 52/52 on the
+                      benchmark, against 40/52 when the model is asked
+  skills              local model, concept filler removed, then widened
+                      by skill_scan in make_profile.generate()
+  role_keywords       held titles, then specialist-anchored recoveries,
+                      then corpus lift — all validated
+  title_hints         corpus fragments, widened to RULE 3's floor
+  skill_weights       neutral here on purpose: reweight_from_corpus runs
+                      immediately after in generate() and is the thing
+                      that sets these numbers
+  penalty_terms       the user's own avoid-list, nothing inferred
+
+FIELDS THIS ENGINE LEAVES EMPTY, DELIBERATELY
+---------------------------------------------
+domain_half_a / domain_half_b / domain_title_terms / domain_bonus and
+title_exclude all ship empty, which is what the live-validated local
+profiles (profiles/cmp4_narrow_*.py) ran with. The halves were tried
+through a local semantic call and the title_exclude answers measured 46%
+wrong with four fifths unverifiable — and that gate is checked FIRST, so
+a wrong entry deletes a target role before anything scores it.
+config.py's own base ships zero entries too. An empty half with a zero
+bonus is a dead setting, not a missing one.
+
+Gemini does fill these, which is a real difference and is logged rather
+than hidden.
+"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import apply_config as cfg
+
+if cfg.REPO_ROOT not in sys.path:
+    sys.path.insert(0, cfg.REPO_ROOT)
+
+import inference
+import local_extract
+import canonical_guard
+import hard_drop
+import local_search
+import orphan_guard
+import role_evidence
+import skill_concepts
+import unknown_family_guard
+
+# The model this was measured on. Bigger models were tried for extraction
+# and did not do better; see bench/extract_models.py. Resolved per call
+# from OLLAMA_MODEL by local_extract.model_name, so this name is the
+# documented default rather than the value used.
+DEFAULT_MODEL = local_extract.DEFAULT_MODEL
+
+# Mid-scale on the 1-12 severity the schema uses, negated at render time.
+# The avoid-list is the user's own instruction, so it does not need to
+# out-shout a skill weight to be honoured — and render() strips any entry
+# that is already in --exclude-levels, which hard_drop_terms deletes anyway.
+AVOID_SEVERITY = 6
+
+# Neutral, because reweight_from_corpus runs next and is what decides
+# these numbers. Matching skill_scan's own constant keeps a reported
+# skill and a scanned one on the same footing before that runs.
+NEUTRAL_WEIGHT = 3
+
+
+class Escalated(RuntimeError):
+    """The local parse failed a deterministic check with no local fix.
+
+    Carries the reasons, which name the evidence rather than a suspicion:
+    dates that cannot be read, a model confabulating most of an answer, or
+    an employment history flagged entirely as someone else's career.
+    """
+
+    def __init__(self, reasons):
+        self.reasons = list(reasons)
+        super().__init__("; ".join(self.reasons))
+
+
+def _summary(field, years, skills, unverified=False):
+    """The one-line field summary render() puts in the docstring.
+
+    Gemini writes prose here. This states the facts it was derived from,
+    which is more useful to someone checking the profile and cannot
+    misdescribe a career it has not understood.
+    """
+    what = field.strip() or "software engineering"
+    how_long = ("experience not read from the résumé — set it on review" if unverified
+                else "no completed professional years yet" if not years
+                else f"{years} year{'s' if years != 1 else ''} of relevant experience")
+    return f"{what} — {how_long}, {len(skills)} skills read from the résumé."
+
+
+def _notes(decision, fields, years, field):
+    """How this profile was arrived at, for the docstring render() writes.
+
+    Every correction the router made is named. skill_scan appends its own
+    reasons to this string later, in make_profile.widen_skills.
+    """
+    lines = [f"Generated locally — no API key, no data left this machine. "
+             f"Target field read as {field.strip() or 'software engineering'!r}; "
+             f"years_experience COMPUTED from the extracted employment dates, "
+             f"not asked for."]
+    if decision.get("corrections"):
+        for fix in decision["corrections"]:
+            if fix["action"] == "computed":
+                lines.append(
+                    f"{fix['field']}: the model said {fix['from']}, the dates "
+                    f"say {fix['to']} — {fix['why']}.")
+            elif fix["action"] == "unverified":
+                # Removes nothing: it says why the figure is a floor the person sets
+                # (local_extract.route). It had no "removed", and this line raised
+                # KeyError on the live site (2026-10-03).
+                lines.append(f"{fix['field']}: not counted — {fix['why']}.")
+            else:
+                lines.append(
+                    f"{fix['field']}: dropped {', '.join(map(str, fix['removed']))} "
+                    f"— {fix['why']}.")
+    if fields["filler_dropped"]:
+        lines.append(
+            f"Dropped {len(fields['filler_dropped'])} résumé term(s) that name "
+            f"a concept rather than a searchable tool: "
+            f"{', '.join(fields['filler_dropped'])}.")
+    if fields["from_orphans"]:
+        lines.append(
+            f"Added {len(fields['from_orphans'])} keyword(s) for a specialist "
+            f"skill nothing else was searching for: "
+            f"{', '.join(fields['from_orphans'])}.")
+    lines.append(
+        "The two domain halves, the title-alone promoters and title_exclude "
+        "are empty on purpose — see auto-apply/local_profile.py.")
+    return " ".join(lines)
+
+
+def generate(resume_text, prefs, model=None, output_dir=None, log=print,
+             market=None, url=None, backend=None):
+    """One profile, from the résumé and the corpus. Raises Escalated.
+
+    `prefs` is make_profile's dict: locations, exclude_levels, avoid,
+    min_comp_usd and the optional overrides. Only `avoid` is read here —
+    the rest are the user's, and render() applies them.
+
+    `backend` is which side of the boundary the model call goes to —
+    local-direct or remote. It changes WHERE the model runs and nothing
+    else: the prompts, the schema, the router and the arithmetic below
+    are the same code either way, which is what makes the two comparable.
+    """
+    # All resolved here so the log names what was actually asked, and so
+    # OLLAMA_HOST/OLLAMA_MODEL/SWEEP_INFERENCE_* are read at call time
+    # rather than frozen at import.
+    model = local_extract.model_name(model)
+    engine = inference.provider(backend, **({"url": url} if url else {}))
+
+    log(f"  reading the résumé with {model} via {engine.name} "
+        f"at {engine.describe()}")
+    checked, rows, decision = local_extract.read(model, resume_text, url=url,
+                                                 backend=backend)
+    if checked is None:
+        raise Escalated(decision["reasons"])
+    log(f"    grounding: {decision['decision']}"
+        + (f", {len(decision['corrections'])} correction(s)"
+           if decision["corrections"] else ""))
+
+    years = checked["years_experience"]
+    field = (rows or {}).get("target_field") or ""
+
+    log("  deriving the search fields from the jobs already scraped")
+    market = market if market is not None else local_search.Market(output_dir)
+    if not len(market):
+        # No corpus is a cold start, not an error: from_resume() still
+        # gives the person's own job titles, which is the zero-dependency
+        # floor this was designed to have.
+        log("    output/ holds no scored listings — falling back to the "
+            "résumé's own job titles only")
+    # V3 STEP 2. Concept identity is decided HERE, before a single query
+    # exists, so the corpus is matched with the same identities the profile
+    # ends up carrying. It used to be decided in _finish, one stage AFTER
+    # every query had been chosen: `agile/scrum` reached the corpus as one
+    # string nothing had heard of, and became two well-known concepts only
+    # once the search that needed them was already built (audit V3-C1).
+    #
+    # `kept` stays RAW on purpose and is what the profile is built from
+    # below. v2 keeps the résumé's own spellings as the scorer's matcher
+    # keys, and _finish still atomises and weights exactly as it did, so
+    # the final skill representation is unchanged by this move. Only the
+    # set handed to search is canonical.
+    raw = checked.get("skills") or ()
+    kept, filler = local_search.clean_skills(raw, market.vocab)
+    concepts = (skill_concepts.identities(kept)
+                if skill_concepts.enabled() else list(kept))
+    person = {"skills": concepts,
+              "employment": (rows or {}).get("employment") or []}
+    # V3 STEP 1. Built here, and deliberately NOT part of `person`:
+    # fields_for() must not see role intent, so role_keywords, title_hints
+    # and the free-source gate cannot move. This record is carried for
+    # measurement and for a later step to consume; nothing reads it today.
+    signals = local_extract.role_signals(checked, rows)
+    # V3 STEP 3. The role record is built HERE, before a query exists, from the
+    # résumé text that is already in memory. No extra model call, no corpus.
+    # It is consumed in exactly one way, below: as a veto over queries search
+    # has already proposed. It never proposes one.
+    # Built only when the gate is on. With the flag absent nothing in this
+    # block runs, so v2 cannot be broken by a defect in a layer it does not
+    # use — and "identical with the flag off" is a fact about the control
+    # flow rather than a claim about role_evidence being bug-free.
+    role = (role_evidence.build(resume_text, signals,
+                                (rows or {}).get("employment") or [])
+            if role_evidence.enabled() else None)
+    fields = local_search.fields_for(person, market)
+    # V3 STEP 7. canonical() swaps a ranked fragment for a real corpus title.
+    # On the corpus path the replacement is revalidated because canonicalise
+    # runs before validated; on the orphan path it never meets validate at all,
+    # so "software engineer -python developer" reached role_keywords (audit
+    # V3-C6). Only REPLACEMENTS are judged, and the role-term rule routes
+    # through Step 5's own exemption so a grounded title is not taken back.
+    canonical_record = None
+    if canonical_guard.enabled():
+        hard_terms, _soft = local_search.seniority_lists()
+        # Step 5's decision, read through Step 5. An empty query list means
+        # this asks "what is this candidate grounded for" without touching the
+        # real restoration below.
+        exempt, _r5 = hard_drop.restore(
+            {"role_keywords": [], "role_signals": signals,
+             "role_evidence": role}, market)
+        surviving, canonical_record = canonical_guard.revalidate(
+            fields["role_keywords"], fields.get("canonical_trace") or (),
+            getattr(market, "titles", ()), exempt, hard_terms)
+        if canonical_record.get("rejected"):
+            log(f"    canonical guard: rejected "
+                f"{len(canonical_record['rejected'])} replacement(s) "
+                f"{canonical_record['rejected']}")
+            log(canonical_guard.explain(canonical_record))
+        fields = dict(fields, role_keywords=surviving)
+    # The unknown-family guard. Placed HERE, after canonical revalidation and
+    # before everything else, because this is the narrowest point at which all
+    # five facts are known at once: the proposed title, its matched posting
+    # count, its matched employer count, whether it came from the corpus or
+    # from the person's own job title, and what family_of makes of it.
+    #
+    # After canonical on purpose: `sf -data cloud` is canonical's rejection and
+    # stays canonical's, so the record says which layer took it rather than two
+    # layers claiming the same removal. Before the role gate so the free title
+    # gate in render() receives an already-cleaned set — the point is to stop an
+    # unsupported corpus title becoming a query at all, not to patch it out
+    # downstream.
+    unknown_record = None
+    if unknown_family_guard.enabled():
+        surviving, unknown_record = unknown_family_guard.filter_queries(
+            fields["role_keywords"], fields.get("held_keywords") or (),
+            fields.get("admission") or {}, fields.get("canonical_trace") or ())
+        if unknown_record.get("rejected"):
+            log(f"    unknown-family guard: dropped "
+                f"{len(unknown_record['rejected'])} thin quer(y/ies) "
+                f"{unknown_record['rejected']}")
+            log(unknown_family_guard.explain(unknown_record))
+        fields = dict(fields, role_keywords=surviving)
+    # V3 STEP 6. The orphan pass finds a rare skill nobody is searching for and
+    # asks the corpus which titles are posted alongside it. That is useful and
+    # stays; what it must not do is confer a profession. `git` anchors "flutter
+    # developer" for a technical programme manager, and the chain is circular
+    # unless support comes from somewhere the orphan skill did not (audit
+    # V3-C5). Only an orphan-derived ROLE TITLE can be removed here, and only
+    # when the candidate has real evidence pointing elsewhere.
+    orphan_record = None
+    if orphan_guard.enabled():
+        surviving, orphan_record = orphan_guard.filter_queries(
+            fields["role_keywords"], {"role_evidence": role},
+            fields.get("from_orphans") or (),
+            fields.get("orphan_anchors") or ())
+        if orphan_record.get("rejected"):
+            log(f"    orphan guard: dropped "
+                f"{len(orphan_record['rejected'])} manufactured title(s) "
+                f"{orphan_record['rejected']}")
+            log(orphan_guard.explain(orphan_record))
+        fields = dict(fields, role_keywords=surviving)
+    # V3 STEP 5. config.SCORING's drop terms strip "manager", "architect",
+    # "director" and "lead" from every title everywhere, and a title reduced
+    # below two words is discarded, so an Engineering Manager's own job title
+    # produces no search at all (audit V3-C8). A query is restored only when
+    # the candidate has grounded evidence for that exact role, never from
+    # family-level support, so an individual contributor gains nothing. This
+    # runs BEFORE the Step 3 gate on purpose: a restored query is still subject
+    # to it, exactly as one that had never been dropped would be.
+    restored, drop_record = [], None
+    if hard_drop.enabled():
+        restored, drop_record = hard_drop.restore(
+            {"role_keywords": fields["role_keywords"], "role_signals": signals,
+             "role_evidence": role}, market)
+        if restored:
+            log(f"    hard-drop: restored {len(restored)} grounded quer(y/ies) "
+                f"{restored}")
+            fields = dict(fields,
+                          role_keywords=list(fields["role_keywords"]) + restored)
+    rejected = []
+    if role is not None:
+        surviving, rejected = role_evidence.filter_queries(
+            role, fields["role_keywords"])
+        if rejected:
+            log(f"    role gate: {len(fields['role_keywords']) - len(surviving)}"
+                f" of {len(fields['role_keywords'])} quer(y/ies) rejected")
+            log(role_evidence.explain(role, rejected))
+        fields = dict(fields, role_keywords=surviving)
+    # The profile's own list, and the filler line in the notes, are the
+    # pre-canonical ones: this batch changes what search matches on, not
+    # what the review screen shows or what the scorer keys on.
+    fields = dict(fields, skills=sorted(kept), filler_dropped=filler)
+
+    if not fields["role_keywords"]:
+        # Nothing to search for is not a profile. This is the one local
+        # failure that is about the corpus rather than the résumé, and it
+        # is worth saying which.
+        raise Escalated([
+            "role_keywords: no keyword survived validation — the résumé's "
+            f"{len(person['skills'])} skill(s) and "
+            f"{len(person['employment'])} employment row(s) produced nothing "
+            f"the {len(market)}-listing corpus supports"])
+
+    log(f"    {len(fields['role_keywords'])} keyword(s), "
+        f"{len(fields['title_hints'])} title hint(s), "
+        f"{len(fields['skills'])} skill(s)")
+    log(local_search.explain(fields["ranking"]))
+
+    return {
+        "candidate_name": checked.get("name") or "",
+        "field_summary": _summary(field, years, fields["skills"],
+                                  checked.get("experience_unverified", False)),
+        "years_experience": years,
+        # Display only — render() ignores it. The review screen shows the
+        # months too, because "1 year" for 1y10m reads as a misparse.
+        "experience_months": checked.get("experience_months"),
+        "role_keywords": fields["role_keywords"],
+        "skill_weights": [{"term": s, "weight": NEUTRAL_WEIGHT}
+                          for s in fields["skills"]],
+        "penalty_terms": [{"term": t.strip().lower(),
+                           "weight": AVOID_SEVERITY}
+                          for t in (prefs.get("avoid") or ()) if t.strip()],
+        # See the module docstring: empty is the validated setting.
+        "domain_half_a": [],
+        "domain_half_b": [],
+        # Only when true, so a clean read's derivation is byte for byte what it was. The work history could not be checked
+        # against the document (local_extract.route), so years_experience is a floor and the review screen asks.
+        **({"experience_unverified": True} if checked.get("experience_unverified") else {}),
+        "domain_title_terms": [],
+        "domain_bonus": 0,
+        "title_hints": fields["title_hints"],
+        "title_exclude": [],
+        "notes": _notes(decision, fields, years, field),
+        # The role-shaped evidence the model already reported. Additive,
+        # unconsumed, and not rendered into profiles/<name>.py — render()
+        # emits only PROFILE_NAMES, so this cannot change what the scraper
+        # runs and cannot force a PROFILE_SCHEMA bump. V3 Step 1.
+        "role_signals": signals,
+        # V3 Step 3. Additive like role_signals: render() emits only
+        # PROFILE_NAMES, so nothing here reaches profiles/<name>.py and no
+        # schema bump is required. Carried for measurement and explainability.
+        "role_evidence": role,
+        "role_gate_rejected": rejected,
+        # V3 Step 5. Additive, like the two above; render() emits only
+        # PROFILE_NAMES, so no schema bump.
+        "hard_drop_restored": restored,
+        "hard_drop_record": drop_record,
+        # V3 Step 6. Additive like the rest; render() emits only PROFILE_NAMES.
+        "orphan_guard_record": orphan_record,
+        # V3 Step 7. Additive like the rest; render() emits only PROFILE_NAMES.
+        "canonical_guard_record": canonical_record,
+        # The unknown-family guard's own record: every decision with the
+        # posting and employer counts behind it. Additive like the rest.
+        "unknown_family_record": unknown_record,
+        # Provenance, for the caller's log and for the tests. render()
+        # ignores keys it does not name.
+        "local_ranking": fields["ranking"],
+        "local_from_orphans": fields["from_orphans"],
+        "local_decision": decision["decision"],
+    }
+
+
+def demo():
+    """Self-check with the model and the corpus both faked."""
+    text = ("Leo Kumar\n"
+            "Salesforce Developer at Acme Cloud, Jan 2023 - Present\n"
+            "Skills: apex, soql, lwc, javascript, SOLID principles\n")
+
+    rows = []
+    for i in range(60):
+        rows.append(("salesforce developer", 25 if i % 2 else 5,
+                     frozenset({"apex", "soql", "lwc"}), f"sfco{i % 20}"))
+    for i in range(400):
+        rows.append((f"software engineer {i % 7}", 3,
+                     frozenset({"java", "sql"}), f"bigco{i % 25}"))
+    market = local_search.Market(rows=rows,
+                                 seniority=("senior", "staff", "lead"))
+
+    answers = {
+        "fields": {"name": "Leo Kumar", "years_experience": 9,
+                   "titles": ["Salesforce Developer"],
+                   "skills": ["apex", "soql", "lwc", "javascript",
+                              "solid principles"],
+                   "companies": ["Acme Cloud"], "education": [],
+                   "institutions": [], "projects": [], "certifications": []},
+        "employment": {"target_field": "software engineering", "employment": [
+            {"company": "Acme Cloud", "title": "Salesforce Developer",
+             "start": "Jan 2023", "end": "Present", "relevant": True}]},
+    }
+    real_extract, real_employment = local_extract.extract, local_extract.employment
+    local_extract.extract = lambda m, t, *a, **k: (answers["fields"], 0.1)
+    local_extract.employment = lambda m, t, *a, **k: answers["employment"]
+    quiet = lambda *a, **k: None
+    try:
+        got = generate(text, {"avoid": ["CRM", ""]}, market=market, log=quiet)
+
+        # The number is COMPUTED, not the 9 the model said.
+        assert got["years_experience"] == local_extract.years_from(
+            answers["employment"]["employment"]), got["years_experience"]
+        assert got["years_experience"] != 9
+        # ...and the correction is stated in the notes, with both figures.
+        assert "the model said 9" in got["notes"], got["notes"]
+
+        # The concept term is gone, the real ones are not.
+        assert "solid principles" not in [w["term"] for w in got["skill_weights"]]
+        assert {"apex", "soql", "lwc"} <= {w["term"] for w in got["skill_weights"]}
+        assert "concept" in got["notes"]
+
+        # The person's own held title leads the keywords.
+        assert got["role_keywords"][0] == "salesforce developer", got
+        assert got["local_ranking"][0][1] == 1
+
+        # Weights are neutral: reweight_from_corpus sets them next.
+        assert {w["weight"] for w in got["skill_weights"]} == {NEUTRAL_WEIGHT}
+
+        # The avoid-list becomes a penalty; the empty string does not.
+        assert got["penalty_terms"] == [{"term": "crm", "weight": AVOID_SEVERITY}]
+
+        # The deliberately-empty fields are empty, and the bonus with them.
+        for field in ("domain_half_a", "domain_half_b", "domain_title_terms",
+                      "title_exclude"):
+            assert got[field] == [], field
+        assert got["domain_bonus"] == 0
+
+        assert got["candidate_name"] == "Leo Kumar"
+        assert got["title_hints"], "the free-source gate must not be empty"
+
+        # Every key render() reads is present, so a malformed profile is a
+        # failure here rather than a KeyError in the config the scraper
+        # imports.
+        import make_profile
+        for key in make_profile.RESPONSE_SCHEMA["required"]:
+            assert key in got, key
+
+        # A confabulating parse escalates rather than being rendered.
+        local_extract.extract = lambda m, t, *a, **k: (
+            dict(answers["fields"], skills=["cobol", "fortran", "rpg"]), 0.1)
+        try:
+            generate(text, {"avoid": []}, market=market, log=quiet)
+            raise AssertionError("a confabulated skill list must escalate")
+        except Escalated as exc:
+            assert "not found in the document" in str(exc), exc
+
+        # A work history the document does not support is not a failure any
+        # more: the profile is built, nothing invented is counted, and the
+        # person is asked for the years (local_extract.route). End to end, so
+        # the notes are written too.
+        local_extract.extract = lambda m, t, *a, **k: (answers["fields"], 0.1)
+        local_extract.employment = lambda m, t, *a, **k: {
+            "target_field": "software engineering", "employment": [
+                {"company": "Initech Global Holdings", "title": "Principal Architect",
+                 "start": "March 1999", "end": "Present", "relevant": True}]}
+        loose = generate(text, {"avoid": []}, market=market, log=quiet)
+        assert loose["experience_unverified"] is True, loose
+        assert loose["years_experience"] == 0, loose["years_experience"]
+        assert "not counted" in loose["notes"], loose["notes"]
+        assert "set it on review" in loose["field_summary"], loose["field_summary"]
+        assert "experience_unverified" not in got, "a clean read carries no flag"
+        local_extract.employment = lambda m, t, *a, **k: answers["employment"]
+
+        # An empty corpus is a cold start, not a failure: the person's own
+        # job title is the zero-dependency floor this was designed to keep.
+        local_extract.extract = lambda m, t, *a, **k: (answers["fields"], 0.1)
+        empty = local_search.Market(rows=[], seniority=("senior",))
+        cold = generate(text, {"avoid": []}, market=empty, log=quiet)
+        assert cold["role_keywords"] == ["salesforce developer"], cold
+
+        # But a one-word title leaves even that floor with nothing — a
+        # bare "Engineer" as a search string buys the catalogue — and with
+        # no corpus to fall back on there is no profile to render.
+        bare = ("Ann Lee\n"
+                "Engineer at Acme Cloud, Jan 2023 - Present\n"
+                "Skills: apex\n")
+        local_extract.extract = lambda m, t, *a, **k: (
+            {"name": "Ann Lee", "years_experience": 3, "titles": ["Engineer"],
+             "skills": ["apex"], "companies": ["Acme Cloud"], "education": [],
+             "institutions": [], "projects": [], "certifications": []}, 0.1)
+        local_extract.employment = lambda m, t, *a, **k: {
+            "target_field": "software engineering",
+            "employment": [{"company": "Acme Cloud", "title": "Engineer",
+                            "start": "Jan 2023", "end": "Present",
+                            "relevant": True}]}
+        try:
+            generate(bare, {"avoid": []}, market=empty, log=quiet)
+            raise AssertionError("no keyword at all must escalate")
+        except Escalated as exc:
+            assert "no keyword survived" in str(exc), exc
+    finally:
+        local_extract.extract, local_extract.employment = (real_extract,
+                                                           real_employment)
+    print("local_profile demo ok")
+
+
+if __name__ == "__main__":
+    if "--demo" in sys.argv:
+        demo()
+    else:
+        print(__doc__)

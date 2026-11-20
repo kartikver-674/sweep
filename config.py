@@ -1,0 +1,1590 @@
+"""
+Configuration for the full-stack job scraper.
+
+EVERYTHING that decides *what* gets pulled and *how* it's ranked lives here. You
+should never need to touch scraper.py to add a keyword, a location, a site, a skill
+weight, or an exclude term.
+
+Philosophy — prove it cheaply first:
+    Every Apify actor run costs money (pay-per-event). A full sweep is
+        len(role_keywords) x len(locations) x (enabled sites)
+    actor runs. So start small and widen only once the pipeline + ranking look right:
+
+        python scraper.py --dry-run          # print the plan + per-site inputs, ZERO cost
+        python scraper.py --test             # 1 keyword x 1 location, indeed only, tiny
+        python scraper.py --site indeed --limit 3   # one site, first 3 combos
+        python scraper.py                    # full sweep (asks to confirm if large)
+
+Sections below:
+    1. SEARCH   — shared criteria + the role x location matrix
+    2. SITES    — which boards to scrape (toggle here)
+    3. SCORING  — resume-based relevance weights, full-stack bonus, exclude/down-rank
+    4. SETTINGS — filtering thresholds, cost guards, output knobs
+    5. PROFILES — named overlays, so one scraper serves several people/searches
+
+Everything here is the DEFAULT profile. To run a different search without
+editing this file, put the keys you want to change in profiles/<name>.py and run
+`python scraper.py --profile <name>` — see section 5.
+"""
+
+# ===========================================================================
+# 1. SEARCH — shared criteria + the role x location matrix
+# ===========================================================================
+# The scraper runs the CROSS PRODUCT of role_keywords x locations for every
+# enabled site. Ordering matters only cosmetically (results are re-ranked by the
+# scoring layer), but full-stack terms are listed first by intent.
+SEARCH = {
+    "country": "IN",            # Indeed country code (IN, US, GB, ...)
+    "experience_years": 2,      # target ~2 yrs (0-3 acceptable); passed to sites that support it
+    "salary_min": None,         # optional minimum salary; None to skip
+    "max_results": 15,          # jobs PER (keyword x location) search — keep modest, pay-per-event (~$5/1000 results)
+
+    # Each entry is run as its OWN search term. Weighted toward full-stack.
+    "role_keywords": [
+        "Full Stack Developer",
+        "Full Stack Engineer",
+        "MERN Stack Developer",
+        "React Native Developer",
+        "React Native Engineer",
+        "React Developer",
+        "Node.js Developer",
+        "Frontend Developer",
+        "Software Engineer JavaScript",
+    ],
+
+    # India-focused (Delhi/NCR heavy) + Remote.
+    "locations": [
+        "Delhi", "New Delhi", "Gurgaon", "Noida",
+        "Bengaluru", "Hyderabad", "Pune", "Remote",
+    ],
+}
+
+
+# ===========================================================================
+# 2. SITES — which boards to scrape
+# ===========================================================================
+# Flip "enabled" to toggle. indeed + naukri on by default (best India signal);
+# linkedin available but off. Per-site input differences are handled by the
+# adapters in scraper.py (build_input) — the SEARCH matrix maps onto each one.
+# Order matters: sites run top-to-bottom, so cheapest-first means a mid-run stop
+# (e.g. account usage cap) loses only the expensive tail. LinkedIn (~$0.001/result)
+# and Indeed (~$0.09/run) run before Naukri (~$0.50/run minimum).
+SITES = {
+    # LinkedIn is cheap (~$0.001/result) but needs a numeric geoId for location
+    # (see LINKEDIN_GEO_IDS). "Delhi / NCR" isn't a LinkedIn geo; use "India" for
+    # broad coverage or a specific city.
+    # remote_geo: which region a bare "Remote" location means. LinkedIn's f_WT=2
+    # filters workplace type WITHIN a geography — there is no worldwide remote
+    # search — so this has to be stated. It was hardcoded to India in the adapter,
+    # which silently made every remote sweep an India-remote sweep.
+    # remote_only: add f_WT=2 to EVERY search, so a list of countries becomes a
+    # list of remote-in-that-country searches. That is how a global remote sweep
+    # is expressed (see profiles/global_remote.py).
+    "linkedin": {"enabled": True,  "actor": "curious_coder/linkedin-jobs-scraper",
+                 "locations": ["India", "Remote"],
+                 "remote_geo": "India", "remote_only": False},
+    "indeed":   {"enabled": True,  "actor": "misceres/indeed-scraper"},
+    # Naukri has a ~$0.50 MINIMUM charge per run, so pulling only a few results is
+    # wasteful. results_per_run overrides SEARCH["max_results"] to pull more per
+    # run and amortize the floor; "locations" overrides SEARCH["locations"] with a
+    # FEW broad regions ("Delhi / NCR" = id 9508 covers Delhi+Gurgaon+Noida in one
+    # run). So naukri does few large runs; control keyword count with --limit.
+    # Runs LAST — it's the priciest, so a cap sacrifices only its remaining combos.
+    # OFF by default, and re-measured 2026-09-12 across every run in output/
+    # (22,745 rows): naukri has still produced ZERO rows and appears in no
+    # .done_combos on any profile — in a year it has never executed once,
+    # because at a $0.50 per-run MINIMUM it is the most expensive source in the
+    # table and its inventory is largely what LinkedIn already returns for the
+    # same searches. Turn it on per profile if you want India-specific boards
+    # LinkedIn misses.
+    #
+    # Deleting the entry outright was tried on 2026-09-12 and REVERTED. It is
+    # not a one-line removal: make_profile.validate_keys rejects a SITES key
+    # that config does not define, so every generated profile breaks, and eight
+    # sweep tests assert naukri's presence in the UI and that its per-run floor
+    # is not scaled by the depth control. enabled=False already means it cannot
+    # be planned or run; the cascade costs more than the dead line it removes.
+    "naukri":   {"enabled": False, "actor": "muhammetakkurtt/naukri-job-scraper",
+                 "results_per_run": 50,
+                 "locations": ["Delhi / NCR", "Remote"]},
+}
+
+# LinkedIn job search filters by a numeric geoId, not a place name. A missing or
+# wrong geoId is NOT a soft failure: LinkedIn ignores the free-text location and
+# returns US results, so you pay full price for the wrong country. The adapter
+# therefore REFUSES to build a LinkedIn search with no geoId rather than guessing.
+#
+# Check any entry (or a raw id) for free, no auth, against LinkedIn's public
+# guest search — it reports where the jobs it returns actually are:
+#     python verify_geoids.py
+#     python verify_geoids.py 103644278
+#
+# NOTE: the actor requires count >= 10 per run.
+LINKEDIN_GEO_IDS = {
+    # --- countries, all VERIFIED 2026-07-26 via verify_geoids.py --------------
+    "United States": "103644278", "United Kingdom": "101165590",
+    "Canada": "101174742", "Ireland": "104738515",
+    "Germany": "101282230", "Netherlands": "102890719",
+    "France": "105015875", "Spain": "105646813", "Portugal": "100364837",
+    "Poland": "105072130", "Sweden": "105117694", "Switzerland": "106693272",
+    "Australia": "101452733", "New Zealand": "105490917",
+    "Singapore": "102454443", "United Arab Emirates": "104305776",
+    "Japan": "101355337", "Brazil": "106057199", "Mexico": "103323778",
+    "South Africa": "104035573",
+    "India": "102713980",
+
+    # --- Indian cities, all VERIFIED 2026-07-26 ------------------------------
+    "Delhi": "106187582",
+    # Chandigarh tricity, VERIFIED 2026-08-26: 10/10 job cards land in it --
+    # four written "Chandigarh, Chandigarh, India", six by district as
+    # "Sahibzada Ajit Singh Nagar, Punjab, India" or "Sas Nagar" (both Mohali).
+    # Found by scraping the public jobs-search page for the location name, after
+    # five blind guesses resolved to Galway, Glasgow, Ahmedabad, Gurugram and
+    # nothing. verify_geoids.py reported MISMATCH until its alias table learned
+    # the district spellings -- that checker rejects a correct id whenever
+    # LinkedIn's label and our name disagree, so read the locations it prints.
+    "Chandigarh": "100139308",
+    "Gurgaon": "115884833", "Gurugram": "115884833",   # LinkedIn labels it Gurugram
+    "Bengaluru": "105214831",
+    "Hyderabad": "105556991",
+    "Pune": "114806696",
+    "Mumbai": "106164952",
+
+    # REMOVED after verification — left here so nobody re-adds them:
+    #   "New Delhi": "106164932"  -> returns Inner Mongolia, CHINA. Use "Delhi".
+    #   "Noida":     "105598789"  -> returns no job cards at all.
+    # Both were previously marked "unverified" and would have been billed in full.
+}
+
+# LinkedIn's company filter is `f_C=<numeric company id>`, and it has exactly the
+# same failure mode as geoId: a wrong id does not error, it silently returns some
+# OTHER company's jobs and bills you in full. So every entry here was verified
+# against the public guest search before use:
+#
+#     python verify_geoids.py --companies
+#
+# Each id below returned 10/10 cards for the named company (2026-08-16).
+#
+# NOT a hypothetical risk — 1409 is widely cited online as Capgemini and is
+# actually **Wells Fargo Advisors**. Verifying caught it before a single run.
+LINKEDIN_COMPANY_IDS = {
+    "Microsoft": "1035",
+    "IBM": "1009",
+    "Deloitte": "1038",
+    "Siemens": "1043",
+    # Capgemini is deliberately ABSENT: its numeric id is not exposed on any
+    # guest surface (the job cards and posting pages carry only the "capgemini"
+    # slug, no urn:li:organization). Target it by keyword instead and filter on
+    # the company column — a distinctive company name makes that precise, and
+    # guessing an id here is how you end up paying for Wells Fargo.
+}
+
+# ---------------------------------------------------------------------------
+# FREE sources: company career boards (ATS) + public remote-job feeds
+# ---------------------------------------------------------------------------
+# No Apify, no per-result cost, stdlib HTTP only. These are the cheapest way to
+# widen coverage, so add liberally.
+#
+# ATS_BOARDS: {platform: {board_token: "Display Name"}}. The platform must have
+# an adapter in sources/ats.py's ATS table (adding one there is a dict entry).
+# Find a token from the careers URL:
+#   boards.greenhouse.io/<token>        -> greenhouse
+#   jobs.lever.co/<token>               -> lever
+#   jobs.ashbyhq.com/<token>            -> ashby
+#   careers.smartrecruiters.com/<Token> -> smartrecruiters  (case-sensitive)
+# Every token below was probed and resolves (2026-07-25).
+ATS_BOARDS = {
+    "lever": {
+        "paytm": "Paytm", "meesho": "Meesho", "mindtickle": "Mindtickle",
+        "hevodata": "Hevo Data", "zeta": "Zeta", "fampay": "FamPay",
+        "cred": "CRED",
+        "coderio": "Coderio",         #  0/22  — harvest_ats.py, 2026-07-27
+        # --- Adzuna Phase 1 harvest, 2026-09-11 -------------------------------
+        # Employer names came from the Adzuna API (docs/superpowers/specs/
+        # 2026-09-11-adzuna-phase1-results.md); the boards themselves were
+        # resolved by harvest_ats.py against the platforms already in
+        # sources/ats.py, and every one was re-probed live the day it was added.
+        # Counts are india/total at that probe. b2 = the employer was already
+        # known through a paid sweep, so this is one we can now stop paying to
+        # see; b3 = never seen through any source before.
+        "rws": "RWS",                         #  10/72   b2
+        "dozee": "Dozee",                     #  15/27   b3
+        "pocketfm": "Pocket FM",              #   2/5    b3
+        # --- backlog harvest, 2026-09-11 --------------------------------------
+        # From the Apify-only backlog (docs/superpowers/specs/
+        # 2026-09-11-backlog-harvest.md): 486 of 2,512 companies probed,
+        # 12.9% resolved. Re-probed live the day they were added. Counts are
+        # india/total. Trailing flags: i = this employer has only ever posted
+        # inside India; m = the board carries a posting a PAID sweep already
+        # found, so it converts a job we were paying to see into a free one.
+        "veeva": "Veeva Systems",             #  33/898   m
+        "portagepointpartners": "Portage Point Partners",   #  31/52   im
+        "acceldata": "Acceldata",             #  19/46   im
+        "sophos": "Sophos",                   #  16/115   m
+        "levelai": "Level AI",                #  16/19    m
+        "jumpcloud": "JumpCloud",             #  11/20   im
+        "appzen": "AppZen",                   #  10/22   im
+        "cin7": "Cin7",                       #   2/10    m
+        "binance": "Binance",                 #   2/296   m
+
+    },
+    # Indian employers, plus global companies WITH an India presence — the
+    # combination that makes SETTINGS["keep_restricted_if_hires_home"] pay off,
+    # since their geo-locked remote roles become reachable. India-job counts
+    # probed 2026-07-26. ONE greenhouse key only: a second one silently replaces
+    # this whole dict rather than adding to it.
+    "greenhouse": {
+        # phonepe removed 2026-09-11: its greenhouse AND lever boards both 404.
+        # postman removed 2026-09-24 (V2-D5): HTTP 404 on every one of nine
+        # fetches on file, 2026-09-21..24, and no verified replacement board.
+        "groww": "Groww",
+        "druva": "Druva", "slice": "Slice",
+        "gitlab": "GitLab",           # 30/187 India — an all-remote company
+        "databricks": "Databricks",   # 76/800
+        "twilio": "Twilio",           # 25/183
+        "mongodb": "MongoDB",         # 17/401
+        "elastic": "Elastic",         # 16/204
+        "datadog": "Datadog",         #  9/418
+        "cloudflare": "Cloudflare",   #  3/271
+        "stripe": "Stripe",           # 40/536, 121 dev roles
+        "netradyne": "Netradyne",     # 40/53 — India-heavy
+        "figma": "Figma",             #  3/174
+        # Found by harvest_ats.py from companies the paid sweep had already
+        # surfaced — i.e. we were paying to see these roles through LinkedIn and
+        # can now fetch them free and direct. Probed 2026-07-27.
+        "roku": "Roku",               # 40/234
+        "flix": "Flix",               #  9/154
+        "sumup": "SumUp",             #  2/369
+        "ubiquiti": "Ubiquiti",       #  0/159 — no India entity, so its geo-locked
+        "justworks": "Justworks",     #  0/98    roles can never be rescued; kept
+                                      #          only for worldwide-remote postings
+        # --- Adzuna Phase 1 harvest, 2026-09-11 -------------------------------
+        # Employer names came from the Adzuna API (docs/superpowers/specs/
+        # 2026-09-11-adzuna-phase1-results.md); the boards themselves were
+        # resolved by harvest_ats.py against the platforms already in
+        # sources/ats.py, and every one was re-probed live the day it was added.
+        # Counts are india/total at that probe. b2 = the employer was already
+        # known through a paid sweep, so this is one we can now stop paying to
+        # see; b3 = never seen through any source before.
+        "tide": "Tide",                       #  24/81   b2
+        "bitwarden": "Bitwarden",             #  22/46   b2
+        "nice": "NICE",                       #  22/180  b2
+        "towerresearchcapital": "Tower Research Capital",   #  12/86   b2
+        "dunnhumby": "dunnhumby",             #   2/35   b2
+        "elsevier": "Elsevier",               #   0/9    b2
+        "iris": "Iris Software",              #   0/2    b2
+        "wise": "Wise",                       #   0/18   b2
+        "capco": "Capco",                     # 162/697  b3 — the largest single
+                                              #          board in this table
+        "wppproduction": "WPP Production",    #  31/158  b3
+        "stratainformationgroup": "Strata Information Group",  #   2/11   b3
+        "indigo": "Indigo",                   #   0/2    b3
+        "mcafee": "McAfee, Inc.",             #   0/4    b3
+        "unisonconsulting": "Unison Consulting",            #   0/2    b3
+        "victrix": "Victrix Systems & Labs",  #   0/3    b3
+        # --- backlog harvest, 2026-09-11 --------------------------------------
+        # From the Apify-only backlog (docs/superpowers/specs/
+        # 2026-09-11-backlog-harvest.md): 486 of 2,512 companies probed,
+        # 12.9% resolved. Re-probed live the day they were added. Counts are
+        # india/total. Trailing flags: i = this employer has only ever posted
+        # inside India; m = the board carries a posting a PAID sweep already
+        # found, so it converts a job we were paying to see into a free one.
+        "okta": "Okta",                       # 105/324   m
+        "payoneer": "Payoneer",               #  47/122  im
+        "accordionindia": "Accordion India",  #  21/21   i
+        "netskope": "Netskope",               #  20/139   m
+        "avathon": "Avathon",                 #  16/35   im
+        "newrelic": "New Relic",              #  12/56    m
+        "cloudsek": "CloudSEK",               #  11/14   im
+        "komodohealth": "Komodo Health",      #   8/31   im
+        "godaddy": "GoDaddy",                 #   6/31    m
+        "precisionaq": "Precision AQ",        #   5/40   im
+        "launchdarkly": "LaunchDarkly",       #   5/51   im
+        "bitgo": "BitGo",                     #   4/37   im
+        "eulerity": "Eulerity",               #   1/17    m
+        "rtingscom": "RTINGS.com",            #   0/5     m
+        "fingerprint": "Fingerprint",         #   0/23   im
+        "breezeway": "Breezeway",             #   0/10
+        "diligent": "Diligent",               #   0/5
+        "cobblestoneenergy": "Cobblestone Energy",          #   0/2
+        "shield": "SHIELD",                   #   0/1
+        "bold": "BOLD",                       #   0/1    i
+        # Speechify resolved (greenhouse:speechify, 1,086 postings) and is NOT
+        # here: it publishes one opening per US city with the city IN THE TITLE
+        # ("Go-to-Market - Anaheim, CA, USA"), so 1,041 distinct titles across
+        # 329 locations. job_key is company+title, so dedupe cannot collapse
+        # them and a sweep would carry all of them.
+
+    },
+    # Probed 2026-07-26 and NOT resolvable, so nobody burns time re-trying:
+    # razorpay, zerodha, dream11, sharechat, unacademy, swiggy, zomato, flipkart,
+    # myntra, nykaa, lenskart, browserstack, chargebee, innovaccer, whatfix,
+    # moengage, hasura, atlan, upstox, cars24, zepto, porter, rapido, sprinklr,
+    # jupiter, navi, khatabook, smallcase, cleartax, scaler, turing, deel,
+    # posthog, replit and ~25 more. Only 5 of 61 candidates resolved: most Indian
+    # employers don't expose a public ATS API, they hire via Naukri or a custom
+    # portal. Free ATS expansion has hit diminishing returns.
+    "ashby": {
+        "linear": "Linear", "ramp": "Ramp", "openai": "OpenAI",
+        "notion": "Notion",           #  5/127
+        "teero": "Teero",             #  0/5   — harvest_ats.py, 2026-07-27
+        # Moved here from greenhouse 2026-09-11: that board now 404s and the
+        # company has re-platformed onto Ashby. Same employer, live board.
+        "clickhouse": "ClickHouse",   # was greenhouse, 184 jobs on ashby
+        # --- Adzuna Phase 1 harvest, 2026-09-11 -------------------------------
+        # Employer names came from the Adzuna API (docs/superpowers/specs/
+        # 2026-09-11-adzuna-phase1-results.md); the boards themselves were
+        # resolved by harvest_ats.py against the platforms already in
+        # sources/ats.py, and every one was re-probed live the day it was added.
+        # Counts are india/total at that probe. b2 = the employer was already
+        # known through a paid sweep, so this is one we can now stop paying to
+        # see; b3 = never seen through any source before.
+        "tekion": "Tekion",                   #  88/110  b3
+        "gradera": "Gradera",                 #   6/8    b3
+        "whisk": "Whisk Software Private Limited",          #   0/4    b3
+        # --- backlog harvest, 2026-09-11 --------------------------------------
+        # From the Apify-only backlog (docs/superpowers/specs/
+        # 2026-09-11-backlog-harvest.md): 486 of 2,512 companies probed,
+        # 12.9% resolved. Re-probed live the day they were added. Counts are
+        # india/total. Trailing flags: i = this employer has only ever posted
+        # inside India; m = the board carries a posting a PAID sweep already
+        # found, so it converts a job we were paying to see into a free one.
+        "elevenlabs": "ElevenLabs",           #  10/248   m
+        "uipath": "UiPath",                   #   5/109  i
+        "glomo": "Glomo",                     #   4/8    im
+        "clera": "Clera",                     #   1/267   m
+        "abound": "Abound",                   #   0/19    m
+        "maincode": "Maincode",               #   0/15    m
+        "xero": "Xero",                       #   0/123   m
+        "solace": "Solace",                   #   0/27    m
+        "brainco": "Brain Co.",               #   0/34    m
+        "realmalliance": "Realm Alliance",    #   0/11    m
+        "nory": "Nory",                       #   0/7     m
+        "freetrade": "Freetrade",             #   0/8     m
+        "omni": "Omni",                       #   0/22    m
+        "attio": "Attio",                     #   0/43    m
+        "pylon": "Pylon",                     #   0/12
+        "vantage": "Vantage",                 #   0/5
+        "sitemate": "Sitemate",               #   0/15
+        "pilgrim": "Pilgrim",                 #   0/4    i
+
+    },
+    # smartrecruiters and breezy list NO DESCRIPTION (sources/ats.py maps no
+    # Description field for either), so their postings are scored on the TITLE
+    # ALONE. That is a known, accepted limitation of those adapters and not a
+    # new one — but it means a board here contributes less per posting than a
+    # greenhouse/lever/ashby board of the same size.
+    "smartrecruiters": {
+        # --- Adzuna Phase 1 harvest, 2026-09-11 -------------------------------
+        # Employer names came from the Adzuna API (docs/superpowers/specs/
+        # 2026-09-11-adzuna-phase1-results.md); the boards themselves were
+        # resolved by harvest_ats.py against the platforms already in
+        # sources/ats.py, and every one was re-probed live the day it was added.
+        # Counts are india/total at that probe. b2 = the employer was already
+        # known through a paid sweep, so this is one we can now stop paying to
+        # see; b3 = never seen through any source before.
+        "jitterbit": "Jitterbit",             #  10/25   b2
+        "renesaselectronics": "Renesas Electronics",        #  10/100  b2
+        "sia": "Sia",                         #   2/100  b2
+        "agileengine": "AgileEngine",         #   0/1    b2
+        "jadeglobal": "Jade Global",          #   0/6    b2
+        "version1": "Version 1",              #  24/100  b3
+        "informagroupplc": "Informa Group Plc.",            #  14/100  b3
+        "quantanite": "Quantanite",           #   8/9    b3
+        "blueoptima": "BlueOptima",           #   5/12   b3
+        "keywordsstudios": "Keywords Studios",              #   1/51   b3
+        "metromakro": "METRO/MAKRO",          #   1/100  b3
+        "nisum": "Nisum",                     #   0/1    b3
+        "technogen": "TechnoGen",             #   0/49   b3
+        "vichara": "Vichara Technologies",    #   0/8    b3
+        # --- backlog harvest, 2026-09-11 --------------------------------------
+        # From the Apify-only backlog (docs/superpowers/specs/
+        # 2026-09-11-backlog-harvest.md): 486 of 2,512 companies probed,
+        # 12.9% resolved. Re-probed live the day they were added. Counts are
+        # india/total. Trailing flags: i = this employer has only ever posted
+        # inside India; m = the board carries a posting a PAID sweep already
+        # found, so it converts a job we were paying to see into a free one.
+        "codeyoung": "Codeyoung",             #   2/2    i
+        "capestart": "CapeStart",             #   1/1    i
+        "genpactindia": "Genpact India Pvt. Ltd.",          #   1/1    i
+        "servicetitan": "ServiceTitan",       #   0/8    i
+        "rebelfoods": "Rebel Foods",          #   0/1    i
+        "gepworldwide": "GEP Worldwide",      #   0/1    i
+        "lingaro": "Lingaro",                 #   0/1    i
+        "pentair": "Pentair",                 #   0/1    i
+        "spottedzebra": "Spotted Zebra",      #   0/1
+        "synechron": "Synechron",             #   0/3
+
+    },
+    "breezy": {
+        # --- Adzuna Phase 1 harvest, 2026-09-11 -------------------------------
+        # Employer names came from the Adzuna API (docs/superpowers/specs/
+        # 2026-09-11-adzuna-phase1-results.md); the boards themselves were
+        # resolved by harvest_ats.py against the platforms already in
+        # sources/ats.py, and every one was re-probed live the day it was added.
+        # Counts are india/total at that probe. b2 = the employer was already
+        # known through a paid sweep, so this is one we can now stop paying to
+        # see; b3 = never seen through any source before.
+        "iqvia": "IQVIA",                     #   0/7    b2
+        # --- backlog harvest, 2026-09-11 --------------------------------------
+        # From the Apify-only backlog (docs/superpowers/specs/
+        # 2026-09-11-backlog-harvest.md): 486 of 2,512 companies probed,
+        # 12.9% resolved. Re-probed live the day they were added. Counts are
+        # india/total. Trailing flags: i = this employer has only ever posted
+        # inside India; m = the board carries a posting a PAID sweep already
+        # found, so it converts a job we were paying to see into a free one.
+        "anovia": "Anovia Inc.",              #   9/12   im
+        "foundationhealth": "Foundation Health",            #   0/31
+
+    },
+}
+
+
+# Added 2026-11-20, served from the inventory cache (sources/inventory.py), so
+# each one costs a refresh about a second and a visitor nothing. Sources: the
+# free-source expansion audit's 187 validated boards and career-ops'
+# portals.yml, re-probed on 2026-11-20: every board here answered with jobs.
+# The comment is India software titles / India jobs / all jobs on that day,
+# so the boards worth most to this beta sort first.
+ATS_BOARDS["greenhouse"].update({
+    "zscaler": "Zscaler",                               #  53/101/382
+    "pubmatic": "Pubmatic",                             #  20/31/81
+    "zetaglobal": "Zeta Global",                        #  16/35/101
+    "fivetran": "Fivetran",                             #  15/21/191
+    "rubrik": "Rubrik",                                 #  14/41/207
+    "abnormalsecurity": "Abnormal",                     #  10/11/85
+    "coinbase": "Coinbase",                             #   8/9/253
+    "inmobi": "InMobi",                                 #   8/46/76
+    "zenoti": "Zenoti",                                 #   7/34/56
+    "gleanwork": "Glean",                               #   6/18/128
+    "6sense": "6Sense",                                 #   4/9/33
+    "anthropic": "Anthropic",                           #   4/6/641
+    "apolloio": "Apollo.io",                            #   3/6/46
+    "celonis": "Celonis",                               #   3/22/262
+    "deliveroo": "Deliveroo",                           #   3/6/188
+    "turing": "Turing",                                 #   3/5/34
+    "airbnb": "Airbnb",                                 #   2/12/202
+    "jumio": "Jumio",                                   #   2/4/17
+    "razorpaysoftwareprivatelimited": "Razorpay",       #   2/25/29
+    "sentinellabs": "SentinelOne",                      #   2/11/263
+    "catawiki": "Catawiki",                             #   1/1/35
+    "pointwild": "Point Wild",                          #   1/2/2
+    "salesloft": "Salesloft",                           #   1/1/23
+    "2kmadrid": "2K Madrid",                            #   0/0/1
+    "acquia": "Acquia",                                 #   0/0/6
+    "adyen": "Adyen",                                   #   0/2/241
+    "airtable": "Airtable",                             #   0/0/11
+    "algolia": "Algolia",                               #   0/0/28
+    "amplemarket": "Amplemarket",                       #   0/0/17
+    "apiphani": "Apiphani",                             #   0/0/10
+    "aplayers": "MrBeast Contract",                     #   0/0/5
+    "appnovation": "Appnovation Technologies",          #   0/0/43
+    "arevonenergyimpltest": "Arevon",                   #   0/0/6
+    "arizeai": "Arize AI",                              #   0/0/21
+    "asana": "Asana",                                   #   0/0/113
+    "atlasxhm": "Atlas HXM",                            #   0/1/18
+    "binance": "Binance",                               #   0/3/227
+    "boomilp": "Boomi",                                 #   0/0/35
+    "brainpop": "Brainpop",                             #   0/0/1
+    "brex": "Brex",                                     #   0/0/245
+    "charliehealthbehavioralhealthoperations": "Charlie Health Behavioral Health Operations",#   0/0/16
+    "commercetools": "Commercetools",                   #   0/0/24
+    "comstock": "Comstock",                             #   0/0/85
+    "contentful": "Contentful",                         #   0/0/51
+    "coreweave": "Weights & Biases (CoreWeave)",        #   0/0/317
+    "corporatecareers": "Grandstand",                   #   0/0/6
+    "creativefabrica": "idea.ai",                       #   0/0/11
+    "crossmediainc": "Crossmedia Inc",                  #   0/0/11
+    "customerio": "Customer.io",                        #   0/0/22
+    "devrev": "Devrev",                                 #   0/6/8
+    "dominodatalab": "Domino",                          #   0/1/16
+    "doordashaustralia": "DoorDash ANZ",                #   0/0/19
+    "drsquatch": "Dr. Squatch",                         #   0/0/18
+    "duolingo": "Duolingo",                             #   0/1/54
+    "engine": "Engine",                                 #   0/0/74
+    "enveritas": "Enveritas",                           #   0/0/3
+    "fsastorecom": "Health-eCommerce.com",              #   0/0/6
+    "getbuilt": "Built Technologies",                   #   0/0/12
+    "group14": "Group14 Technologies",                  #   0/0/9
+    "gwkinvestmentmanagementllc": "GW&K Investment Management, LLC",#   0/0/7
+    "hellofresh": "HelloFresh",                         #   0/0/379
+    "helsing": "Helsing",                               #   0/0/175
+    "homeconstructionregulatoryauthority": "Home Construction Regulatory Authority",#   0/0/4
+    "hootsuite": "Hootsuite",                           #   0/0/18
+    "humeai": "Hume AI",                                #   0/0/5
+    "intercom": "Intercom",                             #   0/0/120
+    "isomorphiclabs": "Isomorphic Labs",                #   0/0/38
+    "jusbrasil": "Jusbrasil",                           #   0/0/20
+    "kairospower": "Kairos Power",                      #   0/0/78
+    "later": "Later",                                   #   0/0/33
+    "mazetherapeutics": "Maze Therapeutics",            #   0/0/13
+    "mechanicallicensingcollective": "Mechanical Licensing Collective",#   0/0/2
+    "microblink": "Microblink",                         #   0/0/8
+    "mixpanel": "Mixpanel",                             #   0/4/39
+    "moodhealth": "Mood Health",                        #   0/0/46
+    "n26": "N26",                                       #   0/0/24
+    "nacinternational": "NAC International Inc.",       #   0/0/3
+    "nextroll": "Nextroll",                             #   0/0/4
+    "northpointrecoveryholdingsllc": "Northpoint Recovery Holdings, LLC",#   0/0/47
+    "novacredit": "Nova Credit",                        #   0/0/7
+    "nuharborsecurity": "nuHarbor",                     #   0/0/2
+    "outfit7": "Outfit7",                               #   0/0/8
+    "phenogyinc": "PHENOGY Inc.",                       #   0/0/2
+    "physicsx": "PhysicsX",                             #   0/0/47
+    "pinterest": "Pinterest",                           #   0/0/175
+    "planetscale": "PlanetScale",                       #   0/0/12
+    "polyai": "PolyAI",                                 #   0/0/9
+    "ponderosa": "Ponderosa Garage Doors",              #   0/0/2
+    "reddit": "Reddit",                                 #   0/0/146
+    "safariai": "Safari AI",                            #   0/0/9
+    "scandit": "Scandit",                               #   0/0/11
+    "seurat": "Seurat Technologies",                    #   0/0/5
+    "speechmatics": "Speechmatics",                     #   0/0/8
+    "stabilityai": "Stability AI",                      #   0/0/3
+    "summittherapeutics": "Summit Therapeutics",        #   0/0/54
+    "swayable": "Swayable",                             #   0/0/16
+    "talkdesk2": "Talkdesk",                            #   0/2/34
+    "theorchard": "The Orchard",                        #   0/0/27
+    "thevirtussolution": "The Virtus Solution",         #   0/0/5
+    "thiess": "Thiess",                                 #   0/0/7
+    "traderepublicbank": "Trade Republic",              #   0/0/42
+    "trase": "Trase Systems",                           #   0/0/11
+    "vercel": "Vercel",                                 #   0/1/86
+    "vtex": "Vtex",                                     #   0/0/31
+    "watershed": "Watershed Informatics",               #   0/0/8
+    "whitewatermidstream": "WhiteWater Midstream",      #   0/0/31
+    "wilsonelser": "Wilson Elser - Business & Legal Professionals",#   0/0/49
+    "wingspan": "Wingspan",                             #   0/0/1
+})
+ATS_BOARDS["lever"].update({
+    "smart-working-solutions": "Smart Working Solutions",#   5/10/19
+    "cagents": "Cagents",                               #   0/5/98
+    "contentsquare": "Hotjar",                          #   0/0/25
+    "cybourn": "Cybourn",                               #   0/0/3
+    "deepsky": "Deepsky",                               #   0/0/6
+    "dollskill": "Dollskill",                           #   0/0/9
+    "dreamgames": "Dreamgames",                         #   0/0/17
+    "easystreetcap": "Easystreetcap",                   #   0/0/7
+    "educative": "Educative",                           #   0/0/12
+    "equativ": "Equativ",                               #   0/0/20
+    "fuellabs": "Fuellabs",                             #   0/0/1
+    "girlswhocode": "Girlswhocode",                     #   0/0/1
+    "gomaterials": "Gomaterials",                       #   0/0/6
+    "hellonanny": "Hellonanny",                         #   0/0/7
+    "kogniz": "Kogniz",                                 #   0/0/5
+    "larian": "Larian",                                 #   0/0/69
+    "lyrahealth": "Lyrahealth",                         #   0/5/453
+    "milltownpartners": "Milltownpartners",             #   0/0/15
+    "nuuds": "Nuuds",                                   #   0/0/2
+    "palantir": "Palantir",                             #   0/0/306
+    "paytmpayments": "Paytmpayments",                   #   0/448/1116
+    "peerspace": "Peerspace",                           #   0/0/3
+    "pigment": "Pigment",                               #   0/0/125
+    "porter": "Porter",                                 #   0/0/20
+    "purple-technology": "Purple Technology",           #   0/0/3
+    "rezotx": "Rezotx",                                 #   0/0/5
+    "rightformula": "Rightformula",                     #   0/0/11
+    "royalambulance": "Royalambulance",                 #   0/0/10
+    "spotify": "Spotify",                               #   0/1/89
+    "startengine": "Startengine",                       #   0/0/4
+    "techquarter": "Techquarter",                       #   0/0/7
+    "thiga": "Thiga",                                   #   0/0/17
+    "tinybird": "Tinybird",                             #   0/0/1
+    "trueml": "Trueml",                                 #   0/0/6
+    "truezerotech": "Truezerotech",                     #   0/0/30
+    "venusaero": "Venusaero",                           #   0/0/26
+    "vivenu": "Vivenu",                                 #   0/0/33
+    "wintermute-trading": "Wintermute Trading",         #   0/0/18
+})
+ATS_BOARDS["ashby"].update({
+    "vultr": "Vultr",                                   #   4/11/78
+    "composio": "Composio",                             #   2/4/30
+    "aspora": "Aspora (formerly Vance)",                #   1/6/12
+    "atlan": "Atlan",                                   #   1/3/7
+    "granica": "Granica",                               #   1/1/11
+    "spotdraft": "SpotDraft",                           #   1/10/14
+    "temporal": "Temporal",                             #   1/2/93
+    "1password": "1Password",                           #   0/0/82
+    "AlephAlpha": "Aleph Alpha",                        #   0/0/6
+    "DeepL": "DeepL",                                   #   0/0/10
+    "airbyte": "Airbyte",                               #   0/0/14
+    "aurorasolar": "Aurorasolar",                       #   0/0/5
+    "bantamcommunications": "Bantamcommunications",     #   0/0/1
+    "benepass": "Benepass",                             #   0/0/3
+    "black-forest-labs": "Black Forest Labs",           #   0/0/18
+    "blacksmith": "Blacksmith",                         #   0/0/18
+    "bland": "Bland AI",                                #   0/0/16
+    "careerstrengo": "Careerstrengo",                   #   0/0/1
+    "causaly": "Causaly",                               #   0/0/13
+    "claim-health": "Claim Health",                     #   0/0/10
+    "clarasight": "Clarasight",                         #   0/0/3
+    "claritypediatrics": "Claritypediatrics",           #   0/0/28
+    "claylabs": "Clay Labs",                            #   0/0/59
+    "clerk": "Clerk",                                   #   0/0/2
+    "cocodelivery": "Cocodelivery",                     #   0/0/10
+    "coefficientgiving": "Coefficientgiving",           #   0/0/1
+    "cohere": "Cohere",                                 #   0/0/125
+    "collective": "Collective",                         #   0/0/19
+    "column": "Column",                                 #   0/0/24
+    "comfy-org": "Comfy Org",                           #   0/0/6
+    "coreoftheheart": "Coreoftheheart",                 #   0/0/10
+    "corti": "Corti",                                   #   0/0/4
+    "cradlebio": "Cradle",                              #   0/0/4
+    "decagon": "Decagon",                               #   0/0/109
+    "deepgram": "Deepgram",                             #   0/2/53
+    "develop-health": "Develop Health",                 #   0/0/18
+    "docker": "Docker",                                 #   0/0/52
+    "edsights": "Edsights",                             #   0/0/4
+    "faculty": "Faculty",                               #   0/0/91
+    "farmersd40": "Farmersd40",                         #   0/0/34
+    "filmhub": "Filmhub",                               #   0/0/1
+    "forto": "Forto",                                   #   0/0/11
+    "getground": "Getground",                           #   0/0/10
+    "glacis-ai": "Glacis AI",                           #   0/0/2
+    "hellobrightline": "Hellobrightline",               #   0/0/10
+    "helpscout": "Helpscout",                           #   0/0/6
+    "highbeam": "Highbeam",                             #   0/0/9
+    "injective-labs": "Injective Labs",                 #   0/0/6
+    "inngest": "Inngest",                               #   0/0/2
+    "instil": "Instil",                                 #   0/0/3
+    "ironcladhq": "Ironcladhq",                         #   0/0/23
+    "jigsaw": "Jigsaw",                                 #   0/0/2
+    "junior": "Junior",                                 #   0/0/3
+    "kiwi": "Kiwi",                                     #   0/0/4
+    "klue": "Klue",                                     #   0/0/6
+    "langchain": "LangChain",                           #   0/0/103
+    "legora": "Legora",                                 #   0/0/338
+    "lemon-markets": "Lemon Markets",                   #   0/0/11
+    "lilt-corporate": "Lilt Corporate",                 #   0/0/22
+    "livinghr": "Livinghr",                             #   0/0/27
+    "lorikeet": "Lorikeet",                             #   0/0/12
+    "lovable": "Lovable",                               #   0/0/80
+    "marcohire": "Marcohire",                           #   0/0/4
+    "matter-labs": "Matter Labs",                       #   0/0/2
+    "method-crm": "Method Crm",                         #   0/0/5
+    "mollie": "Mollie",                                 #   0/0/48
+    "mystenlabs": "Mystenlabs",                         #   0/0/10
+    "n8n": "n8n",                                       #   0/0/68
+    "nationgraph": "Nationgraph",                       #   0/0/2
+    "nextpatient": "Nextpatient",                       #   0/0/4
+    "perk": "Travelperk",                               #   0/0/118
+    "perplexity": "Perplexity",                         #   0/0/148
+    "photoroom": "Photoroom",                           #   0/0/7
+    "pinecone": "Pinecone",                             #   0/0/8
+    "pleo": "Pleo",                                     #   0/0/31
+    "procurify": "Procurify",                           #   0/0/9
+    "qualified-health-pbc": "Qualified Health Pbc",     #   0/0/15
+    "resend": "Resend",                                 #   0/0/13
+    "rewind": "Rewind",                                 #   0/0/3
+    "runpod": "RunPod",                                 #   0/0/22
+    "seconddinner": "Seconddinner",                     #   0/0/1
+    "semgrep": "Semgrep",                               #   0/0/16
+    "sentry": "Sentry",                                 #   0/0/42
+    "sierra": "Sierra",                                 #   0/0/194
+    "slash-financial": "Slash Financial",               #   0/0/15
+    "smallstep": "Smallstep",                           #   0/0/2
+    "squads": "Squads",                                 #   0/0/6
+    "standardbots": "Standardbots",                     #   0/0/27
+    "stealth-healthtech-startup": "Stealth Healthtech Startup",#   0/0/10
+    "summerhealth": "Summerhealth",                     #   0/0/2
+    "supabase": "Supabase",                             #   0/0/80
+    "tavahealth": "Tavahealth",                         #   0/0/4
+    "vapi": "Vapi",                                     #   0/0/5
+    "wayve": "Wayve",                                   #   0/0/151
+    "weaviate": "Weaviate",                             #   0/0/2
+    "windborne-systems": "Windborne Systems",           #   0/0/5
+    "workos": "WorkOS",                                 #   0/0/27
+    "zapier": "Zapier",                                 #   0/0/9
+    "zed": "Zed",                                       #   0/0/2
+})
+ATS_BOARDS["smartrecruiters"].update({
+    "Freshworks": "Freshworks",                         #   4/24/100
+    "BoschGroup": "Bosch Group",                        #   2/19/100
+    "Bosch-HomeComfort": "Bosch HomeComfort",           #   0/3/100
+    "swiggy": "Swiggy",                                 #   0/100/100
+})
+ATS_BOARDS["breezy"].update({
+    "skyspecs": "Skyspecs",                             #   1/3/12
+    "delivery-solutions": "Delivery Solutions",         #   0/1/1
+})
+
+# ---------------------------------------------------------------------------
+# OPTUM — one employer's own careers site, kept separate from ATS_BOARDS
+# ---------------------------------------------------------------------------
+# Adapter: sources/optum.py. Free, stdlib, no auth. Not a row in ats.ATS because
+# that table maps a JSON list to dotted paths, and this site returns HTML inside
+# JSON with no description or date in the listing — the JD needs a second
+# request per job (which is also what verifies the requisition is still live).
+#
+# careers.optum.com is dead (NXDOMAIN 2026-07-29); Optum requisitions are served
+# from careers.unitedhealthgroup.com, which hosts every UHG brand in one index.
+# brand="optum" keeps only Optum-branded cards (the per-card CSS class is the
+# ONLY place the brand appears — the site's Brand facet holds business segments).
+#
+# enabled=False by default: this is an employer-specific sweep, switched on by
+# profiles/optum.py, so a normal run is unchanged.
+OPTUM = {
+    "enabled": False,
+    "company": "Optum",
+    "brand": "optum",
+    # ONE empty query = the whole index, which is both cheaper and more complete
+    # than a keyword list. Probed 2026-07-30: the index holds 5,872 jobs, and the
+    # site's full-text search reads the JD body, so a keyword is a strict SUBSET
+    # of "" that also can't be trusted to narrow ("developer" matched 5,787 of
+    # 5,872 — nearly every JD says the word somewhere). A 12-keyword list was
+    # therefore 12 sweeps of the same index that could still miss a role whose
+    # title we want but whose JD never says our words. The title + location gates
+    # (ATS_TITLE_HINTS / ATS_TITLE_EXCLUDE / LOCATION_HINTS) do the narrowing, for
+    # free, and only survivors cost a JD request. Whole sweep: ~59 listing
+    # requests, ~3 min.
+    "keywords": [""],
+    "locations": [""],
+    "per_page": 100,        # verified honoured; the site's own UI uses 15
+    "max_pages": 70,        # 5,872 jobs / 100 = 59 pages + headroom to grow
+    # Re-fetch every JD and drop anything that 404s — a pulled requisition is
+    # gone from the site. See the module docstring for why the Taleo apply URL
+    # can NOT be used for this (it answers 200 for nonexistent reqs).
+    "verify_live": True,
+}
+
+# ---------------------------------------------------------------------------
+# ENTERPRISE — household-name employers that run their own recruiting platform
+# ---------------------------------------------------------------------------
+# Adapter: sources/enterprise.py. Free, stdlib, no auth. Separate from
+# ATS_BOARDS because these are not rented boards: they are four different
+# platforms (amazon.jobs, Oracle Recruiting Cloud, Workday, SuccessFactors),
+# two of which need a JD request per job and one of which needs a POST.
+#
+# Which employers exist is sources/enterprise.EMPLOYERS; this only says which to
+# RUN. Adding a company already on one of those platforms is a dict entry there
+# — Workday and Oracle Recruiting Cloud between them run a large share of the
+# Fortune 500, so the marginal cost of the next name is one line.
+#
+# enabled=False by default: switched on by a profile, so a normal run is
+# unchanged. keywords=[""] sweeps a whole board and lets the title/location
+# gates narrow it; give real keywords only where the board is too big to page.
+ENTERPRISE = {
+    "enabled": False,
+    "employers": ["amazon", "jpmorgan", "oracle", "accenture", "sap"],
+    "keywords": [""],
+    "max_pages": 5,
+    "verify_live": True,
+}
+
+# Public remote-job feeds. No auth, no cost. Adapters live in sources/feeds.py
+# (registered in sources.FEED_FETCHERS). The three structured JSON feeds below
+# are the only free source that reports PAY — the ATS boards never do.
+FEEDS = {
+    "remoteok": {"enabled": True},
+    # Measured the best free source in the project (output/, 2026-09-09): 58% of
+    # its distinct postings scored >= 40, against LinkedIn's 27% and
+    # greenhouse's 11%. It was fetched four categories deep; these are the rest
+    # of the ones a software search should see. One request each, no cost.
+    "wwr": {"enabled": True, "categories": [
+        "remote-programming-jobs",
+        "remote-front-end-programming-jobs",
+        "remote-back-end-programming-jobs",
+        "remote-full-stack-programming-jobs",
+        "remote-devops-sysadmin-jobs",
+        "remote-design-jobs",
+        "remote-product-jobs",
+        "remote-jobs",                     # the catch-all board
+    ]},
+    "remotive": {"enabled": True},
+    "jobicy": {"enabled": True, "count": 50},
+    # `queries` uses himalayas.app/jobs/api/search (q=, 20 per page, no auth),
+    # which did not exist when this was written — the old comment said no filter
+    # was available and the adapter paged blind through ~96k mostly
+    # non-engineering jobs, 200 at a time, for the 76 distinct postings it ever
+    # contributed. make_profile writes the résumé's own role keywords here.
+    # Empty `queries` keeps the old blind paging, so nothing breaks without one.
+    "himalayas": {"enabled": True, "pages": 10, "queries": []},
+}
+
+# Keep a free-source job only if its location mentions one of these.
+# EMPTY = allow every location, which is the right default now that the target
+# is international remote — remote/visa/comp filters do the narrowing instead of
+# a country whitelist. An empty job location is always kept.
+# To go back to India-only, copy HOME_LOCATION_HINTS below into this list.
+LOCATION_HINTS = []
+
+# Where YOU are. Not a filter — this is how a company board is checked for
+# whether the employer hires in your country at all
+# (SETTINGS["keep_restricted_if_hires_home"]).
+# INVARIANT: every fragment in LOCATION_MATCH for a city the Search
+# Preferences picker offers under the "in India" scope must be matched by
+# this list. The picker offers those cities as a NARROWING of "anywhere in
+# India", and scraper.in_home_country reads this list to decide what counts
+# as India — so a city spelling missing here is a place the screen lets you
+# narrow to and then filters out again.
+#
+# Chandigarh was exactly that: offered in the picker, absent here, and
+# "Chandigarh" / "Mohali, Punjab" — the spellings that do not also carry the
+# word "India" — were kept by the city filter and dropped by this one.
+# Measured on 7,132 rows in output/: 27 Chandigarh rows, 15 Mohali, 8 Thane,
+# of which 6 lacked "India" and were being lost.
+# sweep/tests/test_search_prefs.py::test_every_offered_india_city_is_inside_india
+# now fails if a later city reopens the gap.
+HOME_LOCATION_HINTS = [
+    "india", "delhi", "ncr", "gurgaon", "gurugram", "noida", "bengaluru",
+    "bangalore", "hyderabad", "pune", "mumbai", "chennai", "kolkata",
+    "ahmedabad",
+    # Chandigarh and its satellites, Hyderabad's twin city, and Mumbai's
+    # older name and its nearest suburb. All plainly India; all reachable
+    # from the picker.
+    "chandigarh", "mohali", "panchkula", "secunderabad", "bombay", "thane",
+    # Tier-2 tech cities a posting may name with no "India" beside it.
+    "kochi", "cochin", "jaipur", "indore", "coimbatore", "trivandrum",
+    "thiruvananthapuram", "bhubaneswar", "nagpur", "mysuru", "mysore",
+    "vadodara", "visakhapatnam", "lucknow",
+]
+
+# One searchable location NAME -> the text fragments that identify it in a
+# posting's own location string. This is what turns Sweep's location picker
+# into a filter on the FREE sources, which have no location parameter to
+# query: make_profile writes the union of the picked names' fragments into
+# LOCATION_HINTS above, and scraper.location_allowed matches them on
+# alphanumeric boundaries (so "india" does not fire inside "Indiana").
+#
+# Fragments were read off 2,083 real free-source rows in output/, not guessed.
+# The spellings that actually occur: "Hyderabad, Telangana", "Bengaluru,
+# Karnataka", "Bangalore, India", "Gurgaon, Haryana", "Gurugram", "Noida,
+# Uttar Pradesh", "Pune, Maharashtra". City names carry the match; the state
+# and the country are decoration a posting may or may not include.
+#
+# ponytail: a posting that names ONLY a foreign city ("San Francisco",
+# "Mountain View, California") is not matched by its country's entry — the
+# table carries each country's own name, its common abbreviations, and a few
+# hub cities, not a world gazetteer. The India entries ARE complete, because
+# India is the home market and the one this filter has to get right. Upgrade
+# path if international narrowing matters: a city -> country lookup, which is
+# a data problem, not a code one. Paid retrieval is unaffected either way —
+# LinkedIn and Indeed are constrained at the source by geoId / country.
+LOCATION_MATCH = {
+    # The whole country, and every city Sweep can search inside it.
+    "India": list(HOME_LOCATION_HINTS),
+    "Delhi": ["delhi", "new delhi", "ncr"],
+    "New Delhi": ["delhi", "new delhi"],
+    "Delhi / NCR": ["delhi", "new delhi", "ncr", "gurgaon", "gurugram", "noida"],
+    "Gurgaon": ["gurgaon", "gurugram"],
+    "Gurugram": ["gurgaon", "gurugram"],
+    "Noida": ["noida"],
+    "Greater Noida": ["noida", "greater noida"],
+    "Chandigarh": ["chandigarh", "mohali", "panchkula"],
+    # No "blr": it was added here unverified and matches nothing in 7,132
+    # real rows. A three-letter airport code is not a spelling worth widening
+    # a location filter for, and it was the one Bengaluru fragment the India
+    # test above did not recognise.
+    "Bengaluru": ["bengaluru", "bangalore"],
+    "Hyderabad": ["hyderabad", "secunderabad"],
+    "Pune": ["pune"],
+    "Mumbai": ["mumbai", "bombay", "navi mumbai", "thane"],
+
+    "United States": ["united states", "usa", "u.s.", "u.s.a.", "san francisco",
+                      "new york", "seattle", "austin", "boston", "chicago",
+                      "los angeles", "mountain view", "palo alto"],
+    "United Kingdom": ["united kingdom", "uk", "u.k.", "england", "scotland",
+                       "wales", "london", "manchester", "edinburgh", "cambridge"],
+    "Canada": ["canada", "toronto", "vancouver", "montreal", "ottawa"],
+    "Ireland": ["ireland", "dublin", "cork"],
+    "Germany": ["germany", "deutschland", "berlin", "munich", "münchen",
+                "hamburg", "frankfurt"],
+    "Netherlands": ["netherlands", "holland", "amsterdam", "rotterdam",
+                    "utrecht", "eindhoven"],
+    "France": ["france", "paris", "lyon", "toulouse"],
+    "Spain": ["spain", "españa", "madrid", "barcelona", "valencia"],
+    "Portugal": ["portugal", "lisbon", "lisboa", "porto"],
+    "Poland": ["poland", "polska", "warsaw", "warszawa", "krakow", "kraków",
+               "wroclaw"],
+    "Sweden": ["sweden", "sverige", "stockholm", "gothenburg", "malmo"],
+    "Switzerland": ["switzerland", "schweiz", "suisse", "zurich", "zürich",
+                    "geneva", "lausanne"],
+    "Australia": ["australia", "sydney", "melbourne", "brisbane", "perth"],
+    "New Zealand": ["new zealand", "auckland", "wellington", "christchurch"],
+    "Singapore": ["singapore"],
+    "United Arab Emirates": ["united arab emirates", "uae", "dubai",
+                             "abu dhabi", "sharjah"],
+    "Japan": ["japan", "tokyo", "osaka", "kyoto"],
+    "Brazil": ["brazil", "brasil", "sao paulo", "são paulo", "rio de janeiro"],
+    "Mexico": ["mexico", "méxico", "mexico city", "guadalajara", "monterrey"],
+    "South Africa": ["south africa", "johannesburg", "cape town", "durban",
+                     "pretoria"],
+}
+
+# "Remote" is a work arrangement, not a place, so it has no entry above and
+# contributes no location hint. A sweep scoped to remote filters on
+# SETTINGS["work_scope"] / remote_scopes instead — see make_profile.render.
+LOCATION_NOT_A_PLACE = "Remote"
+
+# Free sources return a whole board (finance, ops, HR, ...), so unlike job boards
+# we can't keyword-search. Keep only jobs whose TITLE looks like a software/dev
+# role (case-insensitive substring). Scoring then ranks within these.
+# THE most consequential list in this file for free sources: every ATS board and
+# feed returns its whole catalogue, and scraper.is_dev_title() drops anything
+# whose title matches none of these BEFORE it is ever scored. A term missing
+# here is inventory nobody ever sees.
+#
+# This is the generic software floor. It used to be 21 entries built around one
+# React/Node résumé, which is why the five hand-tuned profiles all replace it —
+# and why a Salesforce or Java résumé, whose generated profile does NOT replace
+# it, lost most of every free board before scoring. make_profile now writes a
+# résumé-specific list UNIONED with this one, so a profile can widen the net but
+# never narrow it below this.
+ATS_TITLE_HINTS = [
+    # Core software engineering. "engineer" alone is deliberately absent —
+    # it matches sales engineer, process engineer, mechanical engineer.
+    "software engineer", "software development", "software dev", "developer",
+    "development engineer", "sde", "programmer", "engineering manager",
+    "member of technical staff", "tech lead", "technical lead", "staff engineer",
+    "principal engineer", "software architect", "solutions architect",
+    # Stack positions
+    "full stack", "fullstack", "full-stack", "frontend", "front end", "front-end",
+    "backend", "back end", "back-end", "web developer", "mern", "mean stack",
+    # Named stacks, so a title that only says the technology still lands
+    "react", "node", "javascript", "typescript", "python", "java ", "golang",
+    ".net", "php", "ruby", "rails", "django", "spring boot", "c#",
+    # Mobile
+    "mobile developer", "mobile engineer", "android", "ios ", "ios engineer",
+    "ios developer", "flutter", "react native",
+    # Application / API / integration
+    "application developer", "api developer", "api engineer",
+    "integration engineer", "systems engineer",
+    # AI / ML — a large and growing share of what these boards post
+    "ml engineer", "ai engineer", "machine learning engineer", "applied ai",
+    "genai", "gen ai", "generative ai", "llm engineer",
+    # Platform / infrastructure / reliability
+    "platform engineer", "infrastructure engineer", "devops", "site reliability",
+    "sre ", "cloud engineer", "build engineer", "release engineer",
+    "automation engineer", "developer productivity", "developer experience",
+    # Quality
+    "qa engineer", "test engineer", "sdet", "quality engineer",
+    # Security
+    "security engineer", "application security",
+]
+
+# Titles to reject even when they DO match a hint above. Checked first, so it
+# wins — which is the only way to keep out a role that borrows a software title
+# for a different job ("Senior Software Engineer - Data Engineer, Spark, ETL").
+# Empty by default: it earns its keep when the hints are broadened past one
+# stack, where a wider net starts catching adjacent careers. Seniority does NOT
+# belong here — SCORING["hard_drop_terms"] already handles it, and as a penalty
+# rather than a silent delete.
+ATS_TITLE_EXCLUDE = []
+
+# Naukri needs numeric city IDs (not names). Map each name you search here to its
+# ID (from the actor's schema). "Remote" is special-cased to a workMode filter, so
+# it needs no entry. Add more IDs as you widen coverage.
+# Indeed is a per-country site: the actor takes a `country` code and searches
+# that market, so a search for "United Kingdom" sent with country "IN" runs on
+# the Indian site and returns nothing useful at full price. SEARCH["country"]
+# used to be the only source of that code and no generated profile could
+# override it, which is exactly how that happened.
+#
+# So the country is DERIVED from the location the search is for, through this
+# table, and scraper.build_input REFUSES a location that is not in it rather
+# than falling back to a guess — the same fail-closed rule LINKEDIN_GEO_IDS
+# already has, and for the same reason: a wrong value here does not error, it
+# silently bills for the wrong market.
+#
+# Keys must cover every name that can reach SEARCH["locations"] or
+# SITES[x]["locations"]: the picker's own list (LINKEDIN_GEO_IDS), this file's
+# defaults, and Naukri's regions. "Remote" is deliberately absent — it is not
+# a place, and build_input handles it explicitly.
+INDEED_COUNTRIES = {
+    "India": "IN", "Delhi": "IN", "New Delhi": "IN", "Delhi / NCR": "IN",
+    "Gurgaon": "IN", "Gurugram": "IN", "Noida": "IN", "Greater Noida": "IN",
+    "Chandigarh": "IN", "Bengaluru": "IN", "Hyderabad": "IN", "Pune": "IN",
+    "Mumbai": "IN",
+    "United States": "US", "United Kingdom": "GB", "Canada": "CA",
+    "Ireland": "IE", "Germany": "DE", "Netherlands": "NL", "France": "FR",
+    "Spain": "ES", "Portugal": "PT", "Poland": "PL", "Sweden": "SE",
+    "Switzerland": "CH", "Australia": "AU", "New Zealand": "NZ",
+    "Singapore": "SG", "United Arab Emirates": "AE", "Japan": "JP",
+    "Brazil": "BR", "Mexico": "MX", "South Africa": "ZA",
+}
+
+NAUKRI_CITY_IDS = {
+    "Delhi / NCR": "9508",   # broad region: Delhi + Gurgaon + Noida (best value)
+    "Delhi": "382",
+    "New Delhi": "6",
+    "Gurgaon": "73", "Gurugram": "73",
+    "Noida": "220", "Greater Noida": "350",
+    "Bengaluru": "97",
+    "Hyderabad": "17",
+    "Pune": "139",
+    "Mumbai": "134",
+}
+
+# Measured cost per paid search, in USD. Every figure here came from a real
+# sweep's billing, not from an actor's self-report — those undercount roughly 3x
+# (see scraper.account_usage_usd). A site absent from this table is free.
+#
+# These are ESTIMATES for planning only. The real guard is
+# SETTINGS["max_spend_usd"], which reads the account mid-sweep and refuses to
+# launch another search once crossed.
+SITE_RATES = {
+    "linkedin": 0.045,   # measured at max_results=25
+    "indeed": 0.09,      # ~$0.09 per run
+    "naukri": 0.50,      # $0.50 per run MINIMUM — bad value at small budgets
+}
+
+# The result count each rate above was measured at. A pay-per-event actor bills
+# per result, so a rate means nothing without the depth it was measured at, and
+# these three were measured at three different depths:
+#   linkedin — the comment above says max_results=25.
+#   indeed   — $0.09/run at the ~$0.03-per-5-results rate noted in SETTINGS
+#              below is 15 results, which is also SEARCH["max_results"].
+#   naukri   — its own results_per_run is 50 and the $0.50 is a per-run
+#              MINIMUM, not a per-result price. Its basis therefore equals the
+#              depth it always runs at, which makes it unscalable on purpose:
+#              the depth control cannot move it, and a floor does not halve.
+# Scaling every rate from one basis over-charges naukri 2x unconditionally and
+# under-states indeed by 40% at the default depth.
+SITE_RATE_BASIS = {
+    "linkedin": 25,
+    "indeed": 15,
+    "naukri": 50,
+}
+
+
+# ===========================================================================
+# 3. SCORING — resume-based relevance layer
+# ===========================================================================
+# Each job's (title + description) is matched, case-insensitively and on WORD
+# BOUNDARIES (so ".net" and "node.js" match cleanly and "lead" won't match
+# "leadership"), against the terms below. Positive weights add to the score;
+# penalty terms subtract; a full-stack bonus rewards frontend+backend overlap.
+SCORING = {
+    # -- Positive skill weights (higher = more central to the resume) ---------
+    "skill_weights": {
+        # Core full-stack stack — highest signal
+        "node": 5, "node.js": 5, "express": 5,
+        "react": 5, "react native": 5, "react.js": 5,
+        "typescript": 5, "mongodb": 5,
+        # Strong supporting skills
+        "redis": 3, "socket.io": 3, "websocket": 3, "websockets": 3,
+        "jwt": 3, "oauth": 3, "rest api": 3, "restful": 3, "mongoose": 3,
+        "mysql": 3, "javascript": 3,
+        # Real-time / auth / concurrency — stated resume strengths
+        "firebase": 2, "fcm": 2, "concurrency": 2, "authentication": 2,
+        # General relevant tooling / practices (from resume)
+        "redux": 2, "expo": 2, "tailwind": 2, "next.js": 2, "jest": 2,
+        "azure devops": 2, "ci/cd": 2,
+        "zod": 1, "react hook form": 1, "html": 1, "css": 1, "es6": 1, "agile": 1,
+        # AI / agentic work. Absent from the base model until now, which meant the
+        # default profile scored his MCP and agent work at zero — the two hits
+        # that looked like coverage, "tailwind" and "html", were substring
+        # coincidences ("ai" in tailwind, "ml" in html). Same weights as
+        # profiles/optum.py and profiles/bigtech.py already use, so the three
+        # agree instead of ranking the same posting differently.
+        "llm": 2, "llms": 2, "gen ai": 2, "rag": 2, "langchain": 2,
+        "agentic": 2, "ai agent": 2, "ai agents": 2, "prompt engineering": 2,
+        "hugging face": 2, "huggingface": 2, "transformers": 2, "nlp": 2,
+        "openai": 1, "embeddings": 1, "vector database": 1, "mcp": 1,
+        # RÉSUMÉ-BACKED and missing until now. B.E. Computer Science —
+        # Artificial Intelligence & Machine Learning, plus a GAN image-restoration
+        # project in Python/TensorFlow/OpenCV. Python especially: it is asked for
+        # by a large share of the postings this sweep will see, and the model
+        # scored it at zero.
+        "python": 3, "machine learning": 2, "deep learning": 2,
+        "tensorflow": 2, "opencv": 1, "artificial intelligence": 1, "gan": 1,
+        "c++": 1,
+        # Named engineering work from the projects, all of it distinctive enough
+        # to be worth points: multi-document Mongo transactions and
+        # compare-and-swap in MediCart, rotating refresh-token families and
+        # 2dsphere geospatial search in RentKaro.
+        "transactions": 2, "rate limiting": 1, "rate limiter": 1,
+        "refresh token": 1, "geospatial": 1,
+    },
+
+    # -- Full-stack bonus -----------------------------------------------------
+    # A job mentioning BOTH a frontend AND a backend term is a true full-stack
+    # role → is_fullstack=True and fullstack_bonus added. Explicit full-stack /
+    # MERN wording in the TITLE also flags it as full-stack outright.
+    "frontend_terms": [
+        "react", "react native", "react.js", "redux", "expo", "tailwind",
+        "next.js", "zod", "react hook form", "frontend", "front-end", "front end", "ui",
+    ],
+    "backend_terms": [
+        "node", "node.js", "express", "mongodb", "mongoose", "mysql", "redis",
+        "socket.io", "rest api", "restful", "firebase", "backend", "back-end",
+        "back end", "api", "server",
+    ],
+    "fullstack_bonus": 6,
+    "fullstack_title_terms": ["full stack", "full-stack", "fullstack", "mern", "mean"],
+
+    # -- Down-ranking (penalty) ----------------------------------------------
+    # Stacks I don't do + Salesforce/CRM. Salesforce/CRM are penalized HARD so
+    # pure-CRM roles sink to the bottom (or drop out via SETTINGS["min_score"]).
+    "penalty_terms": {
+        ".net": -6, "asp.net": -6, "c#": -6,
+        "java": -5, "java spring": -6, "spring boot": -6, "spring mvc": -6,
+        "php": -6, "laravel": -5,
+        "angular": -4, "angularjs": -4,
+        # Salesforce / CRM — hard down-rank
+        "salesforce": -12, "apex": -12, "lwc": -12,
+        "lightning web component": -12, "crm developer": -12, "crm": -6,
+    },
+
+    # Lead-gen farms, not employers. They repost other companies' listings under
+    # their own name — one set of titles sprayed across country subdomains with
+    # sequential LinkedIn IDs — so they match the résumé well and score at the
+    # very top while being unapplyable. Measured on the 2026-07-26 sweep: 4 names
+    # accounted for 11 of the 15 "reachable" rows at score >= 20. Dropped
+    # outright, whatever they score. Matched on the company name, case- and
+    # punctuation-insensitively ("SWAKIO™" -> "swakio"), whole name only, so a
+    # real employer whose name merely contains one of these is unaffected.
+    # jobgether and speechify were both kept out of ATS_BOARDS on 2026-09-11 and
+    # are blocked here too, because a retroactive audit found them ALREADY IN
+    # paid output — 41 and 12 LinkedIn rows respectively. They fail in two
+    # different ways, and only the first is what this list was written for:
+    #
+    #   jobgether   a repost aggregator, not an employer. Its Lever board is
+    #               4,669 postings, 2,023 titles reposted across up to 42
+    #               countries. 19 distinct postings reached our output, 12 of
+    #               them scoring >= 20 and 5 >= 40 — all of them other
+    #               companies' jobs, applied for through the wrong door.
+    #   speechify   A REAL EMPLOYER, blocked for posting SHAPE rather than
+    #               provenance: it publishes one row per city with the city in
+    #               the TITLE ("Software Engineer, Platform - Sydney,
+    #               Australia"), which job_key cannot collapse because it keys
+    #               on company+title. Its board would carry 920 rows for 4
+    #               distinct roles. Blocking it does delete genuine openings —
+    #               today all 12 score 11-12, none >= 20 — so if that trade ever
+    #               looks wrong, remove this one entry rather than the pair.
+    "company_blocklist": ["hired", "hire feed", "jobs ai", "swakio",
+                          "jobgether", "speechify"],
+
+    # -- Seniority filters ----------------------------------------------------
+    # Two tiers, because a job TITLE is a label and not a requirement. The real
+    # experience gate is SETTINGS["max_experience_years"], which reads the years
+    # actually demanded by the text; these lists only handle the title.
+    #
+    # hard_drop_terms: never a fit at this experience level whatever the JD says.
+    # Removed entirely (or penalized, if SETTINGS["drop_excluded"] is False).
+    "hard_drop_terms": [
+        "principal", "staff", "manager", "architect", "director",
+        "head of", "vp", "chief",
+        # TOO JUNIOR, which nothing in the model caught. max_experience_years
+        # reads the years a posting DEMANDS, so it stops "8+ years" and has no
+        # opinion whatever about a req that wants zero. Measured on the free
+        # global sweep of 2026-09-01: Notion's "Software Engineer, New Grad
+        # (Dec 2026)" ranked 3rd of the abroad rows at 44, Mactores' "Full Stack
+        # Product Engineer Intern" ranked 2nd of the remote rows at 30, and
+        # Stripe's "Software Engineer, Intern" made the India list. They score
+        # well because a new-grad JD lists the same stack; the mismatch is
+        # entirely in the band.
+        #
+        # Here rather than in ATS_TITLE_EXCLUDE on purpose: that list only gates
+        # the free sources (see scraper.is_dev_title), while hard_drop_terms runs
+        # on paid rows too AND is re-applied to stored rows at merge time, so
+        # rows already on disk get dropped instead of lingering with old scores.
+        #
+        # "intern" and "internship" are both listed because the matcher is
+        # word-boundary: "intern" does not fire inside "internship" -- nor,
+        # usefully, inside "internal" or "international".
+        "intern", "internship", "trainee", "fresher", "apprentice", "co-op",
+        "new grad", "graduate", "junior", "jr",
+    ],
+    # soft_drop_terms: usually inflated titling, especially in international
+    # remote, where "Senior" routinely means 3-4 years. NEVER dropped — only
+    # down-ranked, so max_experience_years decides on the stated requirement
+    # instead. Measured on a live sweep: hard-dropping these deleted 13 of 28
+    # reachable remote roles whose JDs asked for <= 3 years (Twilio, Datadog,
+    # Proxify, Lemon.io, A.Team).
+    "soft_drop_terms": ["senior", "sr", "lead"],
+
+    "drop_penalty": -15,   # hard drops, when drop_excluded is False
+    "soft_penalty": -4,    # soft title match: sinks it, never removes it
+    # A CONFIRMED overall minimum 1-2 years above the candidate, under
+    # SWEEP_EXPERIENCE_MISMATCH_GUARD. Sized between the two above: a stated
+    # bar is harder evidence than an inflated title, and softer than a title
+    # the candidate can never hold. Inert while the flag is off.
+    "experience_gap_penalty": -8,
+
+    # Per hour of timezone gap beyond enrich.TZ_FREE_HOURS. Down-ranks rather
+    # than drops, because a wide gap is a cost to weigh, not a disqualifier.
+    "timezone_gap_penalty": -1.5,
+}
+
+
+# ===========================================================================
+# 4. SETTINGS — filtering thresholds, cost guards, output knobs
+# ===========================================================================
+SETTINGS = {
+    # Filtering
+    "drop_excluded": True,       # True: filter out title-seniority + over-experienced roles
+                                 # False: keep them but apply drop_penalty (they sink)
+    "max_experience_years": 3,   # roles whose text demands MORE than this (e.g. "5+ years") are dropped/penalized
+    # The candidate's own experience in MONTHS, for experience_guard. Whole
+    # years are floored (2y11m reads as 2), and a gap threshold built on a
+    # floored year hard-drops on eleven months of rounding — so the guard
+    # refuses to run without this. make_profile renders it; None disables the
+    # guard entirely, which is the right default for a hand-written profile.
+    "candidate_experience_months": None,
+    # How to combine several "N years" figures in one posting. "max" reads the
+    # largest as the real ask; "min" the smallest.
+    #
+    # Defaulted to "max" on the evidence, 2026-09-09: all five hand-tuned
+    # profiles in this repo already set it, scraper's own docstring records 63
+    # requisitions where the two disagreed 21 times and max was right every
+    # time, and a user reported the symptom "min" produces — the results
+    # column reading 2+ or 3+ on postings whose JD asks for 5+ or 8+, because
+    # a structured JD states a per-skill figure next to its total.
+    #
+    # Under-reading is the dangerous direction: it puts a senior role at the
+    # top of a junior candidate's shortlist, while over-reading only drops a
+    # reachable one. See scraper._required_experience_floor.
+    "experience_aggregate": "max",
+    "min_score": None,           # drop jobs scoring below this after ranking (None = keep all, just sorted)
+    "max_age_days": 14,          # drop jobs posted longer ago than this (older ones are likely closed). None to disable.
+    "drop_undated": False,       # if True, also drop jobs whose posted date can't be parsed (default: keep them)
+    # Minimum compensation, annualized and in USD, so an Indian LPA figure and a
+    # US/EU salary are compared on the same axis (see scraper.comp_max_usd).
+    # 6000 USD ~= the old pay floor. Undisclosed, unparseable, or
+    # unknown-currency pay is always KEPT — we never drop on a guess.
+    # Raise this to ~40000+ once the sweep is weighted toward international remote.
+    "min_comp_usd": 6000,        # None to disable
+
+    # International-remote filters, from the signals enrich.py reads out of the
+    # job text (visible as the remote_scope / visa / eor / timezones columns
+    # whether or not you filter on them). ALL DEFAULT TO OFF: these read messy
+    # prose, so a blank signal means "the posting didn't say", never "no", and
+    # switching one on WILL drop jobs that simply forgot to mention it.
+    #
+    # remote_scopes: keep only these scopes. Values, most to least reachable:
+    #   "worldwide"  explicitly hire from anywhere
+    #   "remote"     remote, no geography stated
+    #   "restricted" remote but geo-locked (check the remote_regions column)
+    #   "hybrid" / "onsite" / "" (not stated)
+    # For remote roles workable from India, start with ["worldwide", "remote"].
+    #
+    # ON, because off was worse than useless: the 2026-07-26 sweep returned 480
+    # jobs at score >= 10 of which 27 were actually reachable from India — 245 of
+    # the top 252 were "remote" only within Germany / Spain / UAE / the UK. The
+    # filter keeps "restricted" rows whose lock is TO India, so India-remote roles
+    # (which LinkedIn labels restricted) survive — see scraper.finalize.
+    "remote_scopes": ["worldwide", "remote"],
+    "drop_no_visa": False,       # drop only jobs that EXPLICITLY refuse to sponsor
+    "require_eor": False,        # keep only jobs naming an employer-of-record path
+
+    # work_scope: which WORK ARRANGEMENT the person is actually shopping for.
+    # Set by Sweep's Search-preferences screen; None (the default) means no
+    # arrangement filter at all, which is what every hand-written profile in
+    # profiles/ has always had.
+    #
+    #   None       no filter — score and rank everything that was fetched
+    #   "remote"   remote roles only. Expressed through remote_scopes above
+    #              (["worldwide", "remote"] plus the hires-home rescue), so
+    #              this value adds NOTHING on its own and is carried only so
+    #              the profile records which of the three the person chose.
+    #   "india"    onsite/hybrid roles located in India
+    #   "global"   onsite/hybrid roles, any country
+    #
+    # "onsite/hybrid" is the COMPLEMENT of enrich.REMOTE_SCOPES, not the pair
+    # ("onsite", "hybrid"): roughly 40% of real rows state no arrangement at
+    # all, and this file's standing rule is that a blank signal means "the
+    # posting didn't say", never "no". So india/global keep onsite, hybrid AND
+    # unstated, and drop only what the posting positively calls remote.
+    "work_scope": None,
+
+    # Rescue geo-locked roles at employers who demonstrably hire where you are.
+    # A company posting ANY job in HOME_LOCATION_HINTS has an entity or EOR there,
+    # so its "US Remote" listing is worth an application; one with none is a dead
+    # end whatever the wording. Measured: Postman 12/114 India jobs, OpenAI 9/753,
+    # Druva 11/31 -> yes. Linear 0/25, Ramp 0/118 -> no. Costs nothing: those rows
+    # are already fetched. Only ATS boards can answer it (a feed gives us no
+    # company board), so feed rows are always "" and never rescued.
+    "keep_restricted_if_hires_home": True,
+
+    # Timezone distance from home, used to down-rank roles you couldn't sustain.
+    # 5.5 = IST. Gaps up to enrich.TZ_FREE_HOURS (5h) are free; beyond that each
+    # hour costs SCORING["timezone_gap_penalty"]. IST->CET is 4.5h (fine),
+    # IST->US-Pacific is 13.5h (why so many US companies won't hire from India).
+    "home_utc_offset": 5.5,      # None to skip timezone scoring entirely
+
+    # Cost guards ("prove it cheaply first")
+    # NOTE: misceres/indeed-scraper measured at ~$0.03 per 5 results (~$5 / 1000
+    # results). Your $5 free credit is therefore ~1000 results total. max_spend_usd
+    # below stops launching new runs once the run's cumulative cost hits it, so a
+    # sweep self-limits well under the free tier.
+    "max_spend_usd": None,          # None = no cap (cost headroom + backup API key available); set a $ value to self-limit
+    # V2-D1, account pool only: False (the default) runs the WHOLE paid plan or
+    # none of it — if the connected accounts cannot safely hold every search,
+    # nothing starts. True is the user's explicit "run with my available credit
+    # anyway": the longest prefix of the plan they can hold runs, in plan
+    # order, and the rest is recorded as skipped for capacity (never as done).
+    "allow_partial_paid_sweep": False,
+    "max_searches_per_site": None,  # cap (keyword x location) combos per site (None = full sweep; --limit overrides)
+    "confirm_above_runs": 12,       # if planned actor runs exceed this, ask before spending (skip with --yes)
+    "test_max_results": 5,          # max_results used by --test
+
+    # Output
+    "output_dir": "output",
+    "top_n_console": 10,         # how many top jobs to print to the console
+    "description_max": 20000,    # cap description length BEFORE scoring; keep large so
+                                 # skills aren't cut off (ATS JDs start with long company
+                                 # boilerplate). Description isn't an output column — this
+                                 # only bounds pathological sizes, it doesn't limit scoring.
+}
+
+
+# ===========================================================================
+# 5. PROFILES — named overlays so one scraper serves several people/searches
+# ===========================================================================
+# A profile is profiles/<name>.py defining ONLY the keys it wants to change:
+#
+#     SEARCH   = {"role_keywords": [...], "locations": [...]}
+#     SETTINGS = {"remote_scopes": ["worldwide", "remote"]}
+#
+# Merge is one level deep: each top-level dict is .update()d, so a profile that
+# sets SCORING["skill_weights"] replaces the whole stack while leaving
+# penalty_terms alone. That is almost always what you want — a different person
+# has a different stack, not extra terms bolted onto this one.
+#
+# Named profiles also get their own output/<name>/ directory, so two people's
+# sweeps stop landing in the same folder (which is why output/ currently has
+# hand-made archive-* subdirectories). The default profile keeps plain output/,
+# so existing tooling and auto-apply/ are unaffected.
+#
+#     python scraper.py --profile sara
+#     JOB_PROFILE=sara python scraper.py        # equivalent
+#
+# NOTE: the name is read HERE, at config import time, straight from sys.argv —
+# not from parsed arguments. scraper.py precompiles its regex tables from SCORING
+# at module level, so a profile applied any later would be silently ignored by
+# the scoring layer. That is the one thing about this design worth remembering.
+import copy
+import os
+import sys
+
+OVERLAYABLE = ("SEARCH", "SITES", "SCORING", "SETTINGS", "ATS_BOARDS", "FEEDS",
+               "OPTUM", "ENTERPRISE", "LOCATION_HINTS", "ATS_TITLE_HINTS",
+               "ATS_TITLE_EXCLUDE")
+
+
+def _selected_profile(argv=None, env=None):
+    """Profile name from --profile NAME / --profile=NAME, else $JOB_PROFILE."""
+    argv = sys.argv if argv is None else argv
+    env = os.environ if env is None else env
+    for i, arg in enumerate(argv):
+        if arg == "--profile" and i + 1 < len(argv):
+            return argv[i + 1]
+        if arg.startswith("--profile="):
+            return arg.split("=", 1)[1]
+    return env.get("JOB_PROFILE") or ""
+
+
+def _overlay(module, target=None):
+    """Apply one profile module's dicts onto the config globals. Returns the
+    names it changed, for the run banner.
+
+    A profile that OMITS a name inherits it. A profile that sets it to {} clears
+    it — that is how a section is switched off. Those two cases have to be
+    distinguished by presence, not truthiness: skipping falsy overrides meant
+    `FEEDS = {}` silently inherited every default feed instead of disabling them,
+    and a profile ran 28 sources it had explicitly opted out of.
+
+    Dicts merge one level deep (.update); LIST settings (LOCATION_HINTS,
+    ATS_TITLE_HINTS, ATS_TITLE_EXCLUDE) REPLACE wholesale, because they are
+    single filter vocabularies — appending someone else's cities to yours would
+    widen the filter instead of changing it. Without the isinstance branch a
+    list override raised AttributeError (list has no .update), which is why
+    those three could not be overlaid at all. Mutated in place either way, since
+    scraper.py imports these names directly.
+    """
+    target = globals() if target is None else target
+    changed = []
+    for name in OVERLAYABLE:
+        if not hasattr(module, name):
+            continue
+        override = getattr(module, name)
+        if isinstance(target[name], list):
+            target[name][:] = override or []
+        elif override:
+            target[name].update(override)
+        else:
+            target[name].clear()
+        changed.append(name)
+    return changed
+
+
+def _fresh_source_loader():
+    """A source loader that never reads and never writes bytecode.
+
+    Python trusts a cached profiles/__pycache__/<name>.cpython-XYZ.pyc when the
+    source's modification time, in WHOLE SECONDS, and its size match what the
+    .pyc recorded. The console rewrites profiles/<name>.py on Save, on the review
+    screen, on POST /run (stamping the spend cap just before the engine starts)
+    and on re-rank, so two writes inside one second that are the same length
+    (a depth of 20, then 40) left the second one looking unchanged and the
+    engine ran the FIRST write's bytecode: the spend cap and preferences the
+    visitor had just approved were not the ones it used. A profile is a few
+    kilobytes of data: compiling it again costs nothing and cannot be stale.
+    """
+    import importlib.machinery
+
+    class FreshSource(importlib.machinery.SourceFileLoader):
+        def get_code(self, fullname):
+            return self.source_to_code(self.get_data(self.path), self.path)
+
+    return FreshSource
+
+
+def import_profile(name):
+    """profiles.<name> compiled from its source as it is on disk right now.
+
+    Same lookup the import system does (the `profiles` package's own path), so
+    a missing profile is the same ModuleNotFoundError, and a file that is not
+    plain source (a sourceless .pyc) is left to the ordinary import.
+    """
+    import importlib
+    import importlib.machinery
+    import importlib.util
+    package = importlib.import_module("profiles")
+    importlib.invalidate_caches()           # a file made in the last tick must be seen too
+    fullname = f"profiles.{name}"
+    spec = importlib.machinery.PathFinder.find_spec(fullname, package.__path__)
+    if spec is None or not isinstance(spec.loader, importlib.machinery.SourceFileLoader):
+        return importlib.import_module(fullname)
+    spec.loader = _fresh_source_loader()(fullname, spec.origin)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[fullname] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(fullname, None)
+        raise
+    return module
+
+
+def load_profile_module(name):
+    """(module, schema stamp) for one profile, or exit with the reason.
+
+    THE loader. make_profile.load_profile() had the same schema check and
+    production never called it, so the protection was real and
+    unreachable — a profile written by a newer build loaded silently and
+    its search fields were overlaid onto config. Anything that imports a
+    profile goes through here now.
+    """
+    try:
+        module = import_profile(name)
+    except ImportError as exc:
+        # Loud, not silent: falling back to the default profile would quietly run
+        # someone else's search and cost real money doing it.
+        available = sorted(
+            f.removesuffix(".py")
+            for f in os.listdir(os.path.join(os.path.dirname(__file__), "profiles"))
+            if f.endswith(".py") and not f.startswith("_"))
+        sys.exit(f"Unknown profile '{name}' ({exc}). "
+                 f"Available: {', '.join(available) or '(none)'}")
+
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "auto-apply"))
+    try:
+        import make_profile
+    finally:
+        sys.path.pop(0)
+    stamp = make_profile.profile_schema(module)
+    if not stamp["readable"]:
+        # Same loudness, same reason: a profile this build does not
+        # understand must not be run, because running it spends money on a
+        # search nobody configured.
+        sys.exit(f"Cannot run profiles/{name}.py: {stamp['why']}")
+    try:
+        make_profile.check_loaded(module, stamp)
+    except ValueError as exc:
+        sys.exit(f"Cannot run profiles/{name}.py: {exc}")
+    return module, stamp
+
+
+# The defaults exactly as this file writes them, before any profile touches
+# them. A schema-2 track is built on these, then on the Sweep's own SCORING,
+# then on its own values — never on the live globals, which the Sweep's
+# overlay has already changed, so nothing leaks from one track into another.
+# SCORING is the only section a track reads through: every SEARCH and
+# SETTINGS key a track needs, it carries itself.
+BASE_SCORING = copy.deepcopy(SCORING)
+
+PROFILE = _selected_profile()
+PROFILE_CHANGED = []
+# Which engine derived the loaded profile, so the machine SCORING it does
+# not have to be told separately. Two machines agreeing by coincidence is
+# not a contract: Render pins derivation, and the worker's scraper child
+# reads its own environment. None for a schema-2 Sweep: each track names
+# its own, and nothing is bound for the process.
+PROFILE_ENGINE = None
+# Schema 2 only — a Multi-Track Sweep. The tracks as the file wrote them and
+# the loader checked them, and the file's own Sweep-level SCORING. Neither is
+# overlaid: the globals hold the Sweep, and nothing of any track.
+TRACKS = ()
+SWEEP_SCORING = {}
+if PROFILE:
+    _module, _stamp = load_profile_module(PROFILE)
+    if hasattr(_module, "TRACKS"):          # the loader allows it in schema 2 only
+        TRACKS = tuple(copy.deepcopy(_module.TRACKS))
+        SWEEP_SCORING = copy.deepcopy(getattr(_module, "SCORING", {}))
+    else:
+        PROFILE_ENGINE = _stamp.get("engine")
+    PROFILE_CHANGED = _overlay(_module)
+    # Keep each person's sweeps apart unless the profile picks its own directory.
+    if "SETTINGS" not in PROFILE_CHANGED or "output_dir" not in getattr(_module, "SETTINGS", {}):
+        SETTINGS["output_dir"] = os.path.join("output", PROFILE)
+
+
+def demo():
+    """Self-check for the overlay rules. `python config.py` — offline."""
+    assert _selected_profile(["scraper.py"], {}) == ""
+    assert _selected_profile(["s", "--profile", "bob"], {}) == "bob"
+    assert _selected_profile(["s", "--profile=bob"], {}) == "bob"
+    assert _selected_profile(["s"], {"JOB_PROFILE": "bob"}) == "bob"
+    assert _selected_profile(["s", "--profile", "bob"], {"JOB_PROFILE": "eve"}) == "bob"
+    assert _selected_profile(["s", "--profile"], {}) == ""       # no value, no crash
+
+    # One level deep: the named sub-dict is REPLACED, its siblings survive.
+    class Fake:
+        SCORING = {"skill_weights": {"go": 9}}
+        SETTINGS = {"min_comp_usd": 40000}
+    target = {"SCORING": {"skill_weights": {"react": 5}, "penalty_terms": {"php": -6}},
+              "SETTINGS": {"min_comp_usd": 6000, "max_age_days": 14},
+              "SEARCH": {}, "SITES": {}, "ATS_BOARDS": {}, "FEEDS": {}}
+    changed = _overlay(Fake, target)
+    assert target["SCORING"]["skill_weights"] == {"go": 9}         # replaced
+    assert target["SCORING"]["penalty_terms"] == {"php": -6}       # untouched sibling
+    assert target["SETTINGS"] == {"min_comp_usd": 40000, "max_age_days": 14}
+    assert sorted(changed) == ["SCORING", "SETTINGS"]
+
+    # Omitted = inherit, {} = switch off. Distinguished by presence, not
+    # truthiness — treating {} as "nothing to do" made a profile silently run
+    # every source it had opted out of.
+    class Off:
+        FEEDS = {}
+    target = {"SEARCH": {}, "SITES": {}, "SCORING": {}, "SETTINGS": {},
+              "ATS_BOARDS": {"greenhouse": {"x": "X"}},
+              "FEEDS": {"wwr": {"enabled": True}}}
+    changed = _overlay(Off, target)
+    assert target["FEEDS"] == {}, target["FEEDS"]                  # cleared
+    assert target["ATS_BOARDS"] == {"greenhouse": {"x": "X"}}      # omitted -> kept
+    assert changed == ["FEEDS"]
+
+    # LIST settings replace wholesale rather than merging, and an empty list
+    # clears them. Before the isinstance branch this raised AttributeError, so a
+    # profile's LOCATION_HINTS / ATS_TITLE_* were not overlayable at all — a
+    # profile could name its own title gates and silently run the defaults.
+    class Lists:
+        LOCATION_HINTS = ["india", "noida"]
+        ATS_TITLE_EXCLUDE = []
+    target = {"SEARCH": {}, "SITES": {}, "SCORING": {}, "SETTINGS": {},
+              "ATS_BOARDS": {}, "FEEDS": {},
+              "LOCATION_HINTS": ["berlin"],
+              "ATS_TITLE_HINTS": ["developer"],
+              "ATS_TITLE_EXCLUDE": ["sre"]}
+    changed = _overlay(Lists, target)
+    assert target["LOCATION_HINTS"] == ["india", "noida"]   # replaced, not merged
+    assert target["ATS_TITLE_EXCLUDE"] == []               # [] clears it
+    assert target["ATS_TITLE_HINTS"] == ["developer"]      # omitted -> kept
+    assert sorted(changed) == ["ATS_TITLE_EXCLUDE", "LOCATION_HINTS"]
+    print(f"demo ok (active profile: {PROFILE or 'default'})")
+
+
+if __name__ == "__main__":
+    demo()

@@ -1,0 +1,10 @@
+/* D7A GSAP spike. The same arrival as motion-proposed.css (first eight rows, 140 ms, 20 ms apart), written with
+   gsap. This file is the half that cannot be avoided: GSAP sets opacity from script AFTER the rows exist, so
+   without a rule that hides them first, every page paints its rows once at full opacity and then blinks. The
+   rule is applied by motion-gsap-spike.js only if gsap is present, and removed by a failsafe so a script that
+   never finishes cannot leave the list invisible. */
+.reveal, .reveal.r2, .reveal.r3 { animation: none; }
+html.gsap-arrive #results-body > .jobs-section:first-child .jobs tbody tr:nth-child(-n + 8) { opacity: 0; }
+@media (max-width: 47.99rem) {
+  html.gsap-arrive #results-body > .jobs-section:first-child .jobs tbody tr:nth-child(n + 4) { opacity: 1; }
+}

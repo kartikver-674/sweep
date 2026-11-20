@@ -1,0 +1,34 @@
+# Refreshes the free-board inventory (sources/inventory.py) for the sweep
+# worker. Same user, checkout and sandbox as sweep-worker.service; started by
+# sweep-inventory.timer. Install: docs/oracle-sweep-worker.md, "Inventory".
+[Unit]
+Description=Sweep inventory refresh (free boards and feeds)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=sweepworker
+Group=sweepworker
+WorkingDirectory=/opt/sweep-worker/app
+Environment=PYTHONPATH=/opt/sweep-worker/app
+Environment=SWEEP_INVENTORY_DB=/var/lib/sweep-worker/inventory.sqlite
+# Line by line into the journal, not all at once at the end.
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/sweep-worker/venv/bin/python -m sources.inventory refresh
+TimeoutStartSec=45min
+
+# It only waits on the network; keep it well away from qwen3 beside it.
+Nice=10
+MemoryMax=1G
+MemorySwapMax=0
+CPUQuota=60%
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/sweep-worker
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

@@ -1,0 +1,237 @@
+{#- The unified review: what review.html shows only with two or three
+   résumés. Every word comes from resume_cards() — presentation, never a
+   profile's engine fields. The résumés are a ledger: one ruled row each in
+   the setup's order, compact except the one open for editing, which
+   review.html fills with the profile form and which is the only thing on the
+   page in a box. States are said in words and drawn as a shape beside them
+   (a ring, a dot, a tick, a dash, a "!"), so nothing is carried by colour
+   alone. The reading row names what the one model call produces, and claims
+   no progress: there is none to report.
+
+   A row is headed by its label — the name the visitor can change, read off
+   the résumé until they do — with the file it came from under it in the
+   smaller type. Until a résumé is read its label is only the placeholder
+   "Résumé N", which says less than the file does, so the file stands in for
+   it and is not repeated. #}
+
+{% macro status(c) -%}
+  {%- if not c.selected %}Left out
+  {%- elif c.state == 'queued' %}Waiting
+  {%- elif c.state == 'reading' %}Reading now
+  {%- elif c.state == 'ready' %}Ready to review
+  {%- elif c.state == 'reviewed' %}Reviewed
+  {%- elif c.limited %}Not read yet
+  {%- else %}Couldn't finish{% endif %}
+{%- endmacro %}
+
+{# The shape that goes with the word: which of the six states this is. #}
+{% macro shape(c) -%}
+  {%- if not c.selected %}out
+  {%- elif c.state == 'queued' %}waiting
+  {%- elif c.state == 'reading' %}reading
+  {%- elif c.state == 'ready' %}ready
+  {%- elif c.state == 'reviewed' %}reviewed
+  {%- else %}failed{% endif %}
+{%- endmacro %}
+
+{#- A file name, cut in the middle where a long one is least informative: the
+   start says who it is, the end says what kind of file it is. The whole name
+   is what a screen reader is given. #}
+{% macro cut_name(name) -%}
+  {%- set cut = [name|length - 12, 0]|max -%}
+  <span class="visually-hidden">{{ name }}</span><span
+      class="file-head" aria-hidden="true">{{ name[:cut] if cut else name }}</span><span
+      class="file-tail" aria-hidden="true">{{ name[cut:] if cut else '' }}</span>
+{%- endmacro %}
+
+{% macro heading(c) -%}
+  {%- set placeholder = c.label.startswith('Résumé ') and c.label[7:].isdigit() -%}
+  {%- set as_file = placeholder and c.file -%}
+  <div class="resume-head">
+    <span class="rank" aria-hidden="true">{{ '%02d'|format(c.n) }}</span>
+    <div class="resume-id">
+      {#- The file stands in as the heading until there is a label, and is cut
+         the same way as when it is the line under one: a long name must not
+         break mid-word in the largest type on the row. #}
+      <div class="name-line">
+        <h2 id="resume-{{ c.n }}"{% if as_file %} class="is-file" title="{{ c.file }}"{% endif %}><span
+            class="visually-hidden">Résumé {{ c.n }}: </span>{% if as_file %}{{ cut_name(c.file) }}{% else %}{{ c.label }}{% endif %}</h2>
+        {#- The label is the engine's guess at a title, and two résumés for the same kind of role read the same way, so the
+           visitor can name each one here as on Manage (upload.html), and lands back on this page. #}
+        <details class="rename">
+          <summary>Rename<span class="visually-hidden"> résumé {{ c.n }}</span></summary>
+          <form method="post" action="{{ url_for('track_action') }}" class="row">
+            <input type="hidden" name="track" value="{{ c.id }}">
+            <input type="hidden" name="back" value="review">
+            <label><span class="label">Name for résumé {{ c.n }}</span>
+              <input name="name" value="{{ c.label }}" maxlength="40" required></label>
+            <button class="secondary" type="submit" name="do" value="rename">Save name</button>
+          </form>
+        </details>
+      </div>
+      {%- if c.file and not as_file %}
+      <p class="file" title="{{ c.file }}">{{ cut_name(c.file) }}</p>
+      {%- endif %}
+    </div>
+    <span class="status {{ shape(c)|trim }}">{{ status(c) }}</span>
+  </div>
+{%- endmacro %}
+
+{% macro action(c, do, text, kind='secondary') -%}
+  <button class="{{ kind }}" type="submit" name="do" value="{{ do }}">{{ text }}<span
+      class="visually-hidden"> résumé {{ c.n }}</span></button>
+{%- endmacro %}
+
+{# A compact row: what state it is in, and the one or two things to do. #}
+{% macro card(c) -%}
+<section class="resume" data-card="{{ c.id }}" aria-labelledby="resume-{{ c.n }}">
+  {{ heading(c) }}
+  <div class="resume-body{{ ' line' if c.selected and c.state in ('ready', 'reviewed') }}">
+  {%- if not c.selected %}
+  <p class="muted">Not in this search{% if c.state == 'reading' %} — Sweep is finishing reading it{% endif %}.
+    {%- if c.state in ('ready', 'reviewed') %} {{ c.roles }} roles · {{ c.skills }} skills.{% endif %}</p>
+  {%- elif c.state == 'queued' %}
+  <p class="muted">{% if c.after %}Sweep will read this after résumé {{ c.after }}.{% else %}Sweep reads this next.{% endif %}</p>
+  {%- if not c.after %}
+  {# Without a script nothing reads it, so the page offers the button. #}
+  <noscript><form method="post" action="{{ url_for('derive_post', track=c.id) }}">
+    <button class="secondary" type="submit">Read it now</button></form></noscript>
+  {%- endif %}
+  {%- elif c.state == 'reading' %}
+  <p class="muted">Sweep is working out your experience, the roles to search
+    for, your skills and technologies, and the focus of the search.</p>
+  <div class="preview" aria-hidden="true">
+    <span class="bone w-60"></span><span class="bone w-40"></span><span class="bone w-50"></span>
+  </div>
+  {%- elif c.state in ('ready', 'reviewed') %}
+  <p class="muted">{{ c.roles }} roles · {{ c.skills }} skills</p>
+  {%- else %}
+  {#- The status already says "Not read yet" for a limit, so the sentence is
+     not said twice; a failure keeps its fuller one. #}
+  {%- if not c.limited %}
+  <p>Couldn't finish reading this résumé.</p>
+  {%- endif %}
+  {%- if c.why %}
+  <p class="muted">{{ c.why }}</p>
+  {%- endif %}
+  {%- endif %}
+  <form method="post" action="{{ url_for('track_action') }}" class="actions">
+    <input type="hidden" name="track" value="{{ c.id }}">
+    <input type="hidden" name="back" value="review">
+    {%- if not c.selected %}
+    {{ action(c, 'select', 'Include') }}
+    {%- else %}
+    {#- Review is the way on for a résumé that is ready, but the page's one
+       primary belongs to the open résumé's Save, so here it is an outline. #}
+    {%- if c.state == 'ready' %}
+    <a class="secondary" href="{{ url_for('review', track=c.id) }}">Review<span
+        class="visually-hidden"> résumé {{ c.n }}</span></a>
+    {%- elif c.state == 'reviewed' %}
+    <a class="tertiary" href="{{ url_for('review', track=c.id) }}">Edit<span
+        class="visually-hidden"> résumé {{ c.n }}</span></a>
+    {%- elif c.state == 'failed' %}
+    {{ action(c, 'retry', 'Try again') }}
+    {%- endif %}
+    {%- if c.state != 'reviewed' %}
+    {{ action(c, 'deselect', 'Leave out', 'tertiary') }}
+    {%- endif %}
+    {%- endif %}
+  </form>
+  </div>
+</section>
+{%- endmacro %}
+
+{# The open row's frame; review.html puts the profile form in it, and closes
+   both the body and the section. #}
+{% macro open_card(c) -%}
+<section class="resume" data-card="{{ c.id }}" data-open aria-labelledby="resume-{{ c.n }}">
+  {{ heading(c) }}
+  <div class="resume-body">
+{%- endmacro %}
+
+{#- The deck (V2): the open résumé's side of the page, public only. One paper sheet per résumé in the search, the front one the
+   résumé being checked, so the pile says how many there are and which is up. The sheets are decoration (aria-hidden): the
+   words are the rows under them, which are the real cards and keep their actions (reading.js swaps them by id, so each card
+   appears once). Then the pips and the count, then every other card in the setup's order (the ones before the open one, then the
+   ones after), and the form for "Leave this résumé out", which review.html's button reaches with form="leave-out": the button
+   sits in the editor's form, and a form cannot nest in one; it is marked data-going="toss": going.js holds it while the front
+   sheet drops off the pile (going.css). `cut` is the open card's place in `cards` (its length when none is open: every résumé
+   in the search is reviewed, and the front sheet says so); `xp` is the open one's experience, said, or empty when the reader
+   could not check it. #}
+{% macro deck(cards, cut, xp) -%}
+{%- set front = cards[cut] if cut < cards|length else none -%}
+{%- set picked = cards|selectattr('selected')|list -%}
+{%- set looked = picked|selectattr('state', 'equalto', 'reviewed')|list -%}
+<aside class="deck-side" aria-label="Your résumés">
+  <div class="deck" aria-hidden="true">
+    <div class="deck-sheet p0" data-deck-front>
+      {%- if not front %}
+      <p class="deck-file">{{ picked|length }} résumé{{ 's' if picked|length != 1 }}</p>
+      <b class="deck-name">Ready to sweep</b>
+      <span class="deck-state is-done">All looked right</span>
+      {%- else %}
+      {%- if front.file %}
+      <p class="deck-file">{{ cut_name(front.file) }}</p>
+      {%- endif %}
+      <b class="deck-name">{{ front.label }}</b>
+      {%- if xp %}
+      <span class="deck-xp">{{ xp }} of experience</span>
+      {%- endif %}
+      <span class="deck-state">Checking now</span>
+      {%- endif %}
+    </div>
+    {%- for i in range(1, [[picked|length, 3]|min, 1]|max) %}
+    <div class="deck-sheet p{{ i }}"></div>
+    {%- endfor %}
+  </div>
+  <p class="deck-pips" aria-hidden="true">
+    {%- for c in picked %}<i{% if c.state == 'reviewed' %} class="d"{% elif c.open %} class="n"{% endif %}></i>{% endfor -%}
+  </p>
+  <p class="meta">{{ looked|length }} of {{ picked|length }} looked right</p>
+  {%- for c in cards[:cut] %}
+  {{ card(c) }}
+  {%- endfor %}
+  {%- for c in cards[cut + 1:] %}
+  {{ card(c) }}
+  {%- endfor %}
+  {%- if front %}
+  <form id="leave-out" method="post" action="{{ url_for('track_action') }}" data-going="toss">
+    <input type="hidden" name="track" value="{{ front.id }}">
+    <input type="hidden" name="back" value="review">
+  </form>
+  {%- endif %}
+</aside>
+{%- endmacro %}
+
+{# Summarises, and says once what reading costs. The status line is the one
+   live region: a sentence, re-announced only when it changes. #}
+{% macro banner(r, eyebrow='') -%}
+<div class="stack-tight" id="resumes-banner">
+  {%- if eyebrow %}
+  <span class="eyebrow">{{ eyebrow }}</span>
+  {%- endif %}
+  <h1>{{ r.title }}</h1>
+  <p class="lede" role="status">{{ r.status }}</p>
+  <p class="muted">{% if r.reading %}You can review each résumé as soon as it is
+    read, while Sweep reads the others. {% endif %}No scraping credit is spent
+    reading them.</p>
+</div>
+{%- endmacro %}
+
+{# The way on, once every résumé in the search is read and reviewed; until
+   then, the one thing still in the way. While a résumé is open for editing
+   the page already has its primary — that résumé's Save — so the way on is an
+   outline: it leaves without saving what is being edited. #}
+{% macro cta(r) -%}
+<div class="actionbar" id="resumes-continue">
+  <a class="tertiary" href="{{ url_for('upload') }}">Manage your résumés</a>
+  <div class="actions">
+    {%- if r.blocker %}
+    <span class="meta">{{ r.blocker }}</span>
+    {%- else %}
+    <a class="{{ 'secondary' if r.cards|selectattr('open')|list else 'primary' }}" href="{{ url_for('key') }}">Continue to job search<span
+        class="go" aria-hidden="true">&rarr;</span></a>
+    {%- endif %}
+  </div>
+</div>
+{%- endmacro %}

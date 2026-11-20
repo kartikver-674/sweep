@@ -1,0 +1,204 @@
+{% extends "base.html" %}
+{% from "_mark.html" import mark, mark_a %}
+{% block title %}Reading your résumé — Sweep{% endblock %}
+{% block body %}
+<div class="working">
+  {% if public_mode %}{{ mark_a(56) }}{% else %}{{ mark(56) }}{% endif %}
+  <h1>Reading your résumé</h1>
+  {# Not "a few seconds". A cold inference container takes considerably
+     longer than that, and a screen that promises seconds and then runs for
+     fifty of them has told the visitor something false at the one moment
+     they have nothing else to go on. #}
+  <p class="lede">Sweep is turning your résumé into a search profile — which
+    job titles to look for, and how much each of your skills should count.
+    This usually finishes within a minute, and the very first run can take a
+    little longer while the model wakes up. No scraping credit is spent
+    reading it.</p>
+
+  {% if not error %}
+  {# The same row the two running screens use: one dot, one breath, one
+     indeterminate bar. There is no progress to report here — the parse is a
+     model call that either returns or does not — so the bar stays
+     indeterminate and no percentage is shown. #}
+  <div class="activity live">
+    <p class="activity-said">
+      <span class="activity-dot" aria-hidden="true"></span>
+      <b>Working</b>
+      <span class="activity-count">reading your document</span>
+    </p>
+    <div class="working-bar"><span></span></div>
+  </div>
+  {% endif %}
+
+  {% if error %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+
+  {# `waiting` means a parse is ALREADY open for this browser — a refresh, a
+     second tab, or a return after closing the first. The screen watches it
+     instead of starting another: that window cost two model calls, four GPU
+     calls and two of a visitor's three daily slots for one résumé. #}
+  <form id="derive-now" method="post" action="{{ url_for('derive_post', track=track_id) }}"{% if public_mode %} data-sound-next="ready"{% endif %}>
+    {% if error %}
+      <div class="actions">
+        {# It re-reads the SAME résumé and spends a daily slot, so it says
+           so; "different" is the upload link beside it. #}
+        <button class="primary" type="submit">Try reading it again</button>
+        <a class="secondary" href="{{ url_for('upload') }}">Upload another PDF</a>
+      </div>
+    {% else %}
+      {# The bar moved up into the activity row above, and is still gated on
+         nothing: it used to appear only once Alpine had fired the submit, so
+         the first moment of this screen was a "Continue" button with no sign
+         that anything was happening. #}
+      <p class="muted">You do not need to refresh this page — it moves on by
+        itself the moment your profile is ready.
+        {% if waiting %}You can leave it, too: Sweep keeps reading, and your
+        profile will be here when you come back.{% endif %}</p>
+      {# No button here on purpose: this screen is already working, and a
+         control that does nothing is worse than no control. <noscript> keeps
+         one because without a script nothing else moves — except when a
+         parse is already running, where pressing it would only land back
+         here. #}
+      {% if not waiting %}
+      <noscript>
+        <div class="actions">
+          <button class="primary" type="submit">Read my résumé</button>
+          <span class="meta">JavaScript is off, so this step needs the button.</span>
+        </div>
+      </noscript>
+      {% endif %}
+    {% endif %}
+  </form>
+</div>
+
+{% if not error %}
+{# ---- The rest of the screen -------------------------------------------
+
+   Tens of seconds on a cold container, in front of a headline and a bar.
+   What can honestly fill that is what the call is FOR — so this says what
+   is being built and shows the shape it will take.
+
+   These four are NOT server-reported stages. Parsing is one opaque call
+   (two model calls inside it, with nothing exposed between), and the only
+   states this app can see are reading, ready and failed. So they are
+   labelled as what the pass produces, with no ticks, no ordering and no
+   per-item animation — a rotating highlight here would be a progress
+   indicator wearing a disguise. #}
+<div class="split derive-more">
+  <div class="stack">
+    <div class="panel">
+      <h2>What Sweep is preparing</h2>
+      <ul class="plain">
+        <li><b>Your experience</b><span class="meta">Employers, titles and
+          dates, read from the document rather than guessed.</span></li>
+        <li><b>Skills and technologies</b><span class="meta">Everything the
+          résumé names, collapsed so one technology counts once however many
+          ways you spell it.</span></li>
+        <li><b>Which of them matter most</b><span class="meta">Weighted by
+          what the document shows you actually built with, not by how often
+          the word appears.</span></li>
+        <li><b>Your search profile</b><span class="meta">The job titles to
+          search and the weights that will rank what comes back.</span></li>
+      </ul>
+      <p class="meta">All of it happens in one pass, so there are no steps to
+        tick off — the screen moves on when the whole profile is ready.</p>
+    </div>
+  </div>
+
+  <aside class="aside">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>Your profile</h2>
+        <span class="meta">being built</span>
+      </div>
+      {# Placeholders, and only that: no invented skill names, no counts.
+         They shimmer because on THIS screen the wait really is tens of
+         seconds and the page navigates itself when it ends — unlike the free
+         sweep's shortlist, which cannot fill for five minutes and so stays
+         still. #}
+      <div class="preview-grid" aria-hidden="true">
+        <div class="preview">
+          <span class="label">Core skills</span>
+          <span class="bone w-60"></span><span class="bone w-40"></span>
+          <span class="bone w-50"></span>
+        </div>
+        <div class="preview">
+          <span class="label">Experience</span>
+          <span class="bone w-70"></span><span class="bone w-35"></span>
+        </div>
+        <div class="preview">
+          <span class="label">Role signals</span>
+          <span class="bone w-45"></span><span class="bone w-60"></span>
+        </div>
+        <div class="preview">
+          <span class="label">Search keywords</span>
+          <span class="bone w-55"></span><span class="bone w-40"></span>
+          <span class="bone w-65"></span>
+        </div>
+      </div>
+      <p class="meta">You will see every one of these before anything is
+        searched, and you can change them.</p>
+    </div>
+  </aside>
+</div>
+{% endif %}
+
+{% if not error and not waiting %}
+  {# A plain script rather than Alpine's x-init. Alpine is deferred, and a
+     deferred script's execution also waits on the render-blocking font
+     stylesheet — so on a slow network this screen sat with only its fallback
+     button showing and no bar, which is exactly what a user reported seeing.
+     The one screen with no other way forward must not wait for a library.
+
+     Omitted entirely when there is an error: a résumé the model keeps
+     refusing would otherwise retry forever, paying for a call each lap.
+     Omitted when `waiting` for the same reason pointing the other way: a
+     parse is already open, and submitting would start a second. #}
+  <script>
+    (function () {
+      var form = document.getElementById('derive-now'), sent = false;
+      function go() {
+        if (sent) return;
+        sent = true;
+        if (form.requestSubmit) { form.requestSubmit(); } else { form.submit(); }
+      }
+      /* Two frames, so the browser paints this screen before the POST starts
+         — submitting during the load can cancel it, leaving the PREVIOUS page
+         on display for the whole model call, which is the problem this screen
+         exists to solve. The timer is the backstop for a hidden tab, where
+         frames do not fire at all. */
+      requestAnimationFrame(function () { requestAnimationFrame(go); });
+      setTimeout(go, 400);
+    })();
+  </script>
+{% endif %}
+
+{% if waiting %}
+  {# Watching, not working: this screen did not start the parse and must not
+     start one. It asks the same /activity endpoint the strip does — one
+     source of truth for "is Sweep still reading" — and reloads onto the
+     profile when the answer stops being "reading". #}
+  <script>
+    (function () {
+      var EVERY = 3000;
+      function look() {
+        fetch("{{ url_for('activity', on='review') }}",
+              { credentials: "same-origin" })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (d) {
+            var phase = d && d.banner && d.banner.phase;
+            /* Anything but "reading" means this screen is out of date —
+               the profile is ready, or the parse failed and /review will
+               render the error. */
+            if (d && phase !== "reading") {
+              if (window.sweepSound) window.sweepSound.queue("ready");   // the profile page chimes; an error page does not
+              location.reload(); return;
+            }
+            setTimeout(look, EVERY);
+          })
+          .catch(function () { setTimeout(look, EVERY); });
+      }
+      setTimeout(look, EVERY);
+    })();
+  </script>
+{% endif %}
+{% endblock %}

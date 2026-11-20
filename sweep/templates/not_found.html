@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% from "_a.html" import brush %}
+{# Public mode only: sweep/public.py renders it for a URL that matches no route (and for nothing else). It never says
+   which address was asked for: a path is the visitor's to type and ours to not print back. No step is current. #}
+{% block title %}Page not found — Sweep{% endblock %}
+{% block body %}
+<div class="stack nf-a">
+  <div class="stack-tight hero">
+    <span class="nf-brush" aria-hidden="true">{{ brush(40) }}</span>
+    <span class="eyebrow">Lost the trail</span>
+    <h1>This page isn't <span class="scrib">here</span>.</h1>
+    <p class="lede">The address may be mistyped or out of date.</p>
+  </div>
+  <div class="actions">
+    <a class="primary" href="{{ url_for('upload') }}">Back to the start</a>
+  </div>
+</div>
+{% endblock %}

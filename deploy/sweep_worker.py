@@ -1,0 +1,1350 @@
+"""The sweep worker: long-running sweeps on Oracle, driven by Render.
+
+Render Free cannot host a sweep. It spins down after fifteen idle minutes,
+which kills any child it started, and its disk is ephemeral, so results
+vanish on the next deploy. Oracle's A1 already runs all day with a real
+disk — measured headroom beside the inference service is ~5.7 GB of RAM
+against a sweep's 262 MB peak, and a sweep is 4% CPU because it waits on
+the network — so the sweep moves there and Render keeps the session.
+
+    browser ──► Render (session, UI) ──► THIS (bearer, private) ──► scraper.py
+
+Three rules shape everything below.
+
+1.  **An Apify token is a visitor's own credential.** A visitor may hold
+    several (V2-D1: one per account they fund the sweep from). Each arrives
+    in the body of one request, lives in memory only long enough to reach
+    the child — on its stdin, never its environment — and is never written
+    to a status file, a log, a command line, a URL or an exception. A run
+    whose tokens are lost (a restart while queued) is interrupted rather
+    than silently retried, because the alternative is asking someone to
+    hand them over twice.
+
+2.  **Nothing here executes caller-supplied Python.** The API takes
+    structured profile data and renders it with make_profile.render, the
+    same deterministic renderer the local app uses, whose values go
+    through repr() — or a Multi-Track Sweep's TRACKS entries, which
+    make_profile.render_tracks writes the same way. The rendered source
+    is then parsed and checked to be literal assignments and nothing
+    else, so "malformed JSON cannot become code" is a property this file
+    proves rather than assumes.
+
+3.  **State lives on disk, not in this process.** One run at a time with
+    a FIFO queue behind it, each under its own directory with durable
+    status. A restart re-queues what was queued and marks what was
+    running as interrupted; it never loses a run silently.
+
+Runs are deleted after TTL_SECONDS (48h), and never while they are
+queued or running.
+
+A run's RESULT can be final before its process is (V2-B5): the status then
+carries results_ready while state stays running. See results_ready().
+"""
+
+import ast
+import contextlib
+import csv
+import glob
+import hmac
+import json
+import logging
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import threading
+import time
+
+from flask import Flask, jsonify, request
+
+log = logging.getLogger("sweep-worker")
+
+# Where runs live. One directory per run: status.json, profile.py, output/.
+RUNS_ROOT = os.environ.get("SWEEP_WORKER_RUNS") or "/var/lib/sweep-worker/runs"
+# The repo checkout the engine runs from. Its profiles/ package is where a
+# run's rendered profile has to land, because config.py selects a profile by
+# MODULE name (importlib.import_module(f"profiles.{PROFILE}")).
+CHECKOUT = os.environ.get("SWEEP_WORKER_CHECKOUT") or "/opt/sweep-worker/app"
+TOKEN_ENV = "SWEEP_WORKER_TOKEN"
+
+TTL_SECONDS = int(os.environ.get("SWEEP_WORKER_TTL") or 48 * 3600)
+# How long a visitor's Apify key waits in memory between "I'll use my own
+# key" and "start the sweep". Long enough to read the Configure screen
+# properly, short enough that a browser closed at that moment does not
+# leave a credential sitting in a process for the afternoon.
+HOLD_SECONDS = int(os.environ.get("SWEEP_WORKER_HOLD") or 45 * 60)
+# One sweep at a time. The A1 has room for several, but a queue of one is
+# the honest starting point: two sweeps on one box compete for the same
+# network and the same inference service beside them.
+MAX_ACTIVE = 1
+# How many runs may WAIT behind the active one (P4-S1B). The active run is
+# not counted. A run with no place is refused 503 QUEUE_FULL before it
+# exists — no directory, no status, no profile, and any keys its visitor
+# holds here stay held — so the line can never grow past what its last
+# visitor would wait for.
+QUEUE_ENV = "SWEEP_MAX_QUEUED_RUNS"
+DEFAULT_MAX_QUEUED = 10
+QUEUE_FULL = "queue_full"
+# The longest an engine child may hold the one slot (P4-S1C). The documented
+# full default paid Sweep (V2-C5: 90 searches, two paid workers) took 22 min,
+# 12.7 paid + 8.8 free; three résumés at up to three times the paid searches
+# project to ~47 min, ~85 min with paid work serial. Two hours clears all of
+# them; past it the child is terminated, killed KILL_GRACE_SECONDS later if
+# it is still there, and the run fails with RUN_TIMEOUT — never re-queued,
+# so no provider search is started twice — and the next run starts.
+RUN_TIMEOUT_ENV = "SWEEP_RUN_TIMEOUT_SECONDS"
+DEFAULT_RUN_TIMEOUT = 2 * 60 * 60
+MIN_RUN_TIMEOUT = 60
+KILL_GRACE_SECONDS = 30
+RUN_TIMEOUT = "run_timeout"
+
+QUEUED, RUNNING, DONE, FAILED, STOPPED, INTERRUPTED = (
+    "queued", "running", "done", "failed", "stopped", "interrupted")
+TERMINAL = {DONE, FAILED, STOPPED, INTERRUPTED}
+ACTIVE = {QUEUED, RUNNING}
+
+# A run id is also a Python MODULE name (profiles/beta_<id>.py) and a path
+# segment, so it is hex: no hyphens, which import would reject, and nothing
+# a path could interpret.
+RUN_ID_BYTES = 16
+MAX_OWNER = 128
+MAX_BODY = 512 * 1024
+# How many Apify keys one visitor may hold at once (V2-D1). Generous: a FREE
+# account has $5 and the default plan's ceilings are $10.55, so three fund it,
+# and twenty is far past any honest need. A limit at all because each key is
+# two provider reads before the first paid start, and held keys are memory.
+# scraper.BYOK_MAX_KEYS is the same number, and the engine refuses more.
+MAX_KEYS = 20
+KEY_ID_BYTES = 8
+# What a run's engine says about its paid authorization (scraper.AUTH_RECORD),
+# and the only fields of it the status may carry: counts, amounts, words.
+AUTH_RECORD = "paid_authorization.json"
+AUTH_FIELDS = ("outcome", "stop_reason", "full_plan_requested",
+               "partial_authorized_by_user", "full_plan_placeable",
+               "total_planned_paid_units", "placeable_paid_units",
+               "skipped_insufficient_capacity", "skipped_budget",
+               "executed_paid_units", "full_estimate_usd", "partial_estimate_usd")
+# Never handed to a public run's engine: the developer's own capacity clamp,
+# and the marker only this worker may set (V2-D1).
+DEVELOPER_ONLY_ENV = ("SWEEP_PAID_ACCOUNT_CAP_USD", "SWEEP_BYOK_CREDENTIALS")
+# scraper.PUBLIC_PAID_FLAG, read by the same rule (a test pins the two agree):
+# off, this worker creates no paid run — the engine would start none anyway,
+# and a refusal here means no key is even handed over.
+PUBLIC_PAID_FLAG = "SWEEP_PUBLIC_PAID"
+
+
+def public_paid_enabled(env=None):
+    raw = ((os.environ if env is None else env).get(PUBLIC_PAID_FLAG) or "").strip().lower()
+    return raw in ("", "1", "true", "yes", "on")
+
+
+def max_queued(env=None):
+    """SWEEP_MAX_QUEUED_RUNS, or the default. Malformed stops the worker at
+    start-up rather than quietly queueing without a bound."""
+    raw = ((os.environ if env is None else env).get(QUEUE_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_MAX_QUEUED
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        raise SystemExit(f"{QUEUE_ENV}={raw!r} is not a whole number") from None
+
+
+def run_timeout(env=None):
+    """SWEEP_RUN_TIMEOUT_SECONDS, or the default; never under a minute, and
+    there is no "no limit". Malformed stops the worker at start-up."""
+    raw = ((os.environ if env is None else env).get(RUN_TIMEOUT_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_RUN_TIMEOUT
+    try:
+        return max(MIN_RUN_TIMEOUT, int(raw))
+    except ValueError:
+        raise SystemExit(f"{RUN_TIMEOUT_ENV}={raw!r} is not a whole number") from None
+
+
+# A Multi-Track Sweep (Phase 4, MULTI_TRACK_ARCHITECTURE_DESIGN.md §M) arrives
+# as `tracks` in place of `profile`: the engine-ready TRACKS entries Render
+# derived and built (make_profile.render_sweep). This worker validates and
+# writes them (make_profile.render_tracks) and never derives one — it has no
+# résumé to derive from. One résumé is always the legacy `profile` form.
+MIN_TRACKS, MAX_TRACKS = 2, 3
+MULTI_FIELDS = {"tracks", "prefs", "free_only", "apify_token", "owner", "key_ids"}
+# scraper.PLAN_VERSION, PLAN_HASH_ENV and PLAN_CHANGED_EXIT (a test pins them).
+PLAN_VERSION = 2
+PLAN_HASH_ENV = "SWEEP_EXPECTED_PLAN_HASH"
+PLAN_CHANGED_EXIT = 4
+PLAN_CHANGED = "plan_changed"
+PLAN_HASH = re.compile(r"[0-9a-f]{64}")
+# Read only while a Sweep is rendered — on Render, for a worker Sweep — so
+# never handed to its engine: a plan must not hang on this box's copy.
+RENDER_TIME_ENV = ("SWEEP_TRACK_SEARCH_INTENT", "SWEEP_TRACK_SCORING_INTENT",
+                   "SWEEP_TRACK_ALIGNMENT_RECOMMENDATION", "SWEEP_CANDIDATE_TITLE_GATE")
+
+
+class Refused(Exception):
+    """A request that fails for a reason the caller may be told."""
+
+    def __init__(self, status, message):
+        self.status, self.message = status, message
+        super().__init__(message)
+
+
+# --------------------------------------------------------------------------
+# The profile: structured in, literals out
+# --------------------------------------------------------------------------
+
+def _import_make_profile(checkout):
+    """make_profile from the checkout, not from wherever this file sits."""
+    for path in (os.path.join(checkout, "auto-apply"), checkout):
+        if path not in sys.path:
+            sys.path.insert(0, path)
+    import make_profile
+    return make_profile
+
+
+def assert_only_literals(source):
+    """Parse the rendered profile and refuse anything that is not data.
+
+    This is the guard that makes rule 2 a property rather than a promise.
+    A profile is a module of constant assignments; an import, a call, a
+    comprehension or an f-string in there would mean caller data had
+    become caller code, and this raises instead.
+    """
+    tree = ast.parse(source)
+    for node in tree.body:
+        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):
+            continue  # the docstring
+        if not isinstance(node, ast.Assign):
+            raise Refused(400, "the rendered profile is not pure data")
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                continue
+            # The one subscript this worker writes itself: the run's own
+            # output directory. Still checked, never trusted.
+            if (isinstance(target, ast.Subscript)
+                    and isinstance(target.value, ast.Name)
+                    and isinstance(target.slice, ast.Constant)):
+                continue
+            raise Refused(400, "the rendered profile assigns something odd")
+        try:
+            ast.literal_eval(node.value)
+        except (ValueError, SyntaxError, TypeError):
+            raise Refused(400,
+                          "the rendered profile contains a non-literal value") from None
+    return source
+
+
+def _checked(payload):
+    """The structured request, validated before it reaches the renderer."""
+    if not isinstance(payload, dict):
+        raise Refused(400, "the request body must be an object")
+    unknown = set(payload) - {"profile", "prefs", "free_only", "apify_token",
+                              "owner", "key_ids", "engine"}
+    if unknown:
+        raise Refused(400, f"unknown field(s): {', '.join(sorted(unknown))}")
+
+    profile, prefs = payload.get("profile"), payload.get("prefs") or {}
+    if not isinstance(profile, dict) or not isinstance(prefs, dict):
+        raise Refused(400, "profile and prefs must be objects")
+    owner = payload.get("owner")
+    if not isinstance(owner, str) or not 1 <= len(owner) <= MAX_OWNER:
+        raise Refused(400, "owner must be a short opaque string")
+    free_only = payload.get("free_only", True)
+    if not isinstance(free_only, bool):
+        raise Refused(400, "free_only must be true or false")
+
+    token = payload.get("apify_token")
+    if token is not None and (not isinstance(token, str) or not token.strip()):
+        raise Refused(400, "apify_token must be a non-empty string when given")
+    if free_only and token:
+        raise Refused(400, "a free sweep must not carry an Apify token")
+    key_ids = payload.get("key_ids")
+    if key_ids is not None and not (
+            isinstance(key_ids, list) and 0 < len(key_ids) <= MAX_KEYS
+            and all(isinstance(k, str) and 0 < len(k) <= 64 for k in key_ids)):
+        raise Refused(400, "key_ids must be a short list of key ids when given")
+    if free_only and key_ids:
+        raise Refused(400, "a free sweep must not name Apify keys")
+    return profile, prefs, bool(free_only), token, owner, key_ids
+
+
+def is_multi(payload):
+    """Whether a request is a Multi-Track Sweep's: `tracks` and no `profile`.
+    Anything else takes the legacy path and gets exactly its refusals — with
+    both, "unknown field(s): tracks"; with neither, a missing profile."""
+    return isinstance(payload, dict) and "tracks" in payload and "profile" not in payload
+
+
+def _checked_tracks(payload, run=False):
+    """A Multi-Track request, validated before it reaches the renderer:
+    (tracks, prefs, free_only, token, owner, key_ids, expected_plan_hash).
+
+    Only the count is judged here; each entry is make_profile.check_tracks',
+    the engine's own gate. expected_plan_hash is a /v1/runs field only, and
+    every other field is the legacy form's, checked by the legacy rules."""
+    unknown = set(payload) - MULTI_FIELDS - ({"expected_plan_hash"} if run else set())
+    if unknown:
+        raise Refused(400, f"unknown field(s): {', '.join(sorted(unknown))}")
+    tracks = payload["tracks"]
+    if not isinstance(tracks, list) or not MIN_TRACKS <= len(tracks) <= MAX_TRACKS:
+        raise Refused(400, f"tracks must be a list of {MIN_TRACKS} to {MAX_TRACKS} tracks "
+                           f"(one résumé is a profile)")
+    expected = payload.get("expected_plan_hash")
+    if expected is not None and not (isinstance(expected, str) and PLAN_HASH.fullmatch(expected)):
+        raise Refused(400, "expected_plan_hash must be a plan_hash /v1/plans returned")
+    rest = {k: v for k, v in payload.items() if k not in ("tracks", "expected_plan_hash")}
+    _profile, prefs, free_only, token, owner, key_ids = _checked(dict(rest, profile={}))
+    return tracks, prefs, free_only, token, owner, key_ids, expected
+
+
+def _requested_engine(payload, checkout):
+    """The scoring engine the caller named (Phase 0b), or None.
+
+    None — absent, or null like the other optional fields — renders exactly
+    as before this field existed: the renderer's own default, which on this
+    box is v1. Otherwise it must be one of the engine versions the checkout
+    knows ("mixed" is not one), and render() stamps it whatever this
+    process's environment says. The refusal names the type or the allowed
+    values, never what was sent.
+    """
+    engine = payload.get("engine")
+    if engine is None:
+        return None
+    if not isinstance(engine, str):
+        raise Refused(400, "engine must be a string when given")
+    _import_make_profile(checkout)
+    import skill_concepts
+    if engine not in skill_concepts.VERSIONS:
+        raise Refused(400, f"engine must be one of {', '.join(skill_concepts.VERSIONS)}")
+    return engine
+
+
+def paid_sites(checkout=None):
+    """The sites that bill. Read from the live config, never a list typed
+    here — a site added there must not quietly become free."""
+    _import_make_profile(checkout or CHECKOUT)
+    import config
+    return [site for site in config.SITES if site in config.SITE_RATES]
+
+
+def free_prefs(prefs, checkout=None):
+    """The caller's preferences with every paid board switched off.
+
+    Enforced here rather than trusted from Render, because this is the
+    boundary where money would actually be spent: the engine only reaches
+    for an Apify token when a paid plan exists (scraper.py: `if plans:`),
+    so a free run that leaves the paid sites enabled either dies asking
+    for a credential it must never have, or — if one were ever present on
+    this box — spends somebody else's.
+
+    Written through the renderer's own sites_enabled, so config._overlay
+    still receives each site's WHOLE dict; a hand-rolled SITES literal
+    would drop the actor and the rates with it.
+    """
+    return dict(prefs, sites_enabled={site: False
+                                      for site in paid_sites(checkout)})
+
+
+def render_profile(make_profile, name, profile, prefs, output_dir, engine=None):
+    """Rendered profile source for one run, proven to be data. `engine`, when
+    the caller named one, is the stamp; otherwise render() is called exactly
+    as it always was."""
+    try:
+        source = (make_profile.render(name, profile, prefs) if engine is None
+                  else make_profile.render(name, profile, prefs, engine=engine))
+    except Refused:
+        raise
+    except Exception as exc:
+        # The renderer validates every key against the live config, so its
+        # complaints are about the caller's data. The type is named; the
+        # text is not echoed, because it can quote what was sent.
+        raise Refused(400, f"the profile was refused by the renderer "
+                           f"({type(exc).__name__})") from None
+    return _bound(source, output_dir)
+
+
+def render_tracks_profile(make_profile, name, tracks, prefs, output_dir):
+    """A Multi-Track Sweep's one profile source, proven to be data: the
+    Sweep's preferences once and `tracks` exactly as sent, through
+    make_profile.render_tracks — so through check_tracks — and nothing
+    derived here."""
+    try:
+        source = make_profile.render_tracks(name, tracks, prefs)
+    except Exception as exc:
+        # As render_profile: the type, never the text, which quotes the data.
+        raise Refused(400, f"the tracks were refused by the renderer "
+                           f"({type(exc).__name__})") from None
+    return _bound(source, output_dir)
+
+
+def _bound(source, output_dir):
+    # This run's own output directory, written by the worker as a literal
+    # so nothing the caller sent can reach the path.
+    source += (f'\n# Written by sweep_worker for this run.\n'
+               f'SETTINGS["output_dir"] = {output_dir!r}\n')
+    return assert_only_literals(source)
+
+
+def _private(path, flags):
+    """open()'s opener for a Multi-Track Sweep's profile: owner-only, since
+    it holds every track's skill tables."""
+    return os.open(path, flags, 0o600)
+
+
+def multi_env():
+    """A Multi-Track Sweep's engine environment — its /v1/plans dry run, its
+    run's preflight and its run alike, so all three plan the same Sweep: this
+    process's, less every Apify token, the developer-only names, this
+    worker's own bearer token, RENDER_TIME_ENV and any expected plan hash (a
+    run's own is set by default_spawn)."""
+    drop = DEVELOPER_ONLY_ENV + RENDER_TIME_ENV + (PLAN_HASH_ENV, TOKEN_ENV)
+    return {k: v for k, v in os.environ.items()
+            if not k.startswith("APIFY_TOKEN") and k not in drop}
+
+
+def schema2_plan(checkout, name):
+    """The engine's own dry run of profiles/<name>.py, a Multi-Track Sweep.
+
+    Its JSON must attest plan_version 2 and a plan_hash: an engine that does
+    not (a stale checkout) is not one this worker may run a Sweep on, so the
+    plan is refused, never priced. The hash is the engine's, never computed
+    here."""
+    try:
+        out = subprocess.run(
+            [sys.executable, "scraper.py", "--profile", name, "--dry-run", "--json"],
+            cwd=checkout, capture_output=True, text=True, timeout=120, env=multi_env())
+        if out.returncode != 0:
+            raise Refused(502, "the engine could not price that plan")
+        plan = json.loads(out.stdout)
+    except (ValueError, subprocess.SubprocessError) as exc:
+        raise Refused(502, f"the engine could not price that plan "
+                           f"({type(exc).__name__})") from None
+    if not (isinstance(plan, dict) and plan.get("plan_version") == PLAN_VERSION
+            and isinstance(plan.get("plan_hash"), str) and PLAN_HASH.fullmatch(plan["plan_hash"])
+            and isinstance(plan.get("sites"), dict)):
+        raise Refused(502, "the engine could not price that plan "
+                           "(it attests no schema-2 plan hash)")
+    return plan
+
+
+def preflight(checkout, name, expected):
+    """A Multi-Track run's authoritative plan, before anything starts: the
+    engine's dry run of the very file the run will execute, in the run's own
+    environment. Returns the plan hash the run is then bound to.
+
+    The plan decides, never the request: with any provider search in it the
+    caller must name the hash it approved — `free_only` is not proof of a
+    free plan — and a hash named is checked, free or not. A mismatch is
+    PLAN_CHANGED, and no run exists."""
+    plan = schema2_plan(checkout, name)
+    if expected is None and any(plan["sites"].values()):
+        raise Refused(400, "expected_plan_hash is required: this Sweep's plan has "
+                           "paid searches")
+    if expected is not None and expected != plan["plan_hash"]:
+        raise Refused(409, PLAN_CHANGED)
+    return plan["plan_hash"]
+
+
+# --------------------------------------------------------------------------
+# Runs on disk
+# --------------------------------------------------------------------------
+
+class RunStore:
+    """One directory per run, with durable status.
+
+    Disk rather than memory because a queue that a restart empties is a
+    queue that loses somebody's sweep without telling them.
+    """
+
+    def __init__(self, root=None):
+        self.root = root or RUNS_ROOT
+        os.makedirs(self.root, exist_ok=True)
+
+    def dir(self, run_id):
+        # Defence in depth: run ids are generated here and hex, but a path
+        # built from an id is exactly where a traversal would land.
+        if not run_id or not all(c in "0123456789abcdef" for c in run_id):
+            raise Refused(404, "no such run")
+        return os.path.join(self.root, run_id)
+
+    def output_dir(self, run_id):
+        return os.path.join(self.dir(run_id), "output")
+
+    def _status_path(self, run_id):
+        return os.path.join(self.dir(run_id), "status.json")
+
+    def write(self, run_id, status):
+        """Atomically, so a crash mid-write cannot leave unreadable JSON."""
+        path = self._status_path(run_id)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.{os.getpid()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(status, fh, indent=1, sort_keys=True)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        return status
+
+    def read(self, run_id):
+        try:
+            with open(self._status_path(run_id), encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            raise Refused(404, "no such run") from None
+
+    def update(self, run_id, **fields):
+        status = self.read(run_id)
+        status.update(fields)
+        return self.write(run_id, status)
+
+    def all(self):
+        out = []
+        for run_id in sorted(os.listdir(self.root)):
+            with contextlib.suppress(Refused):
+                out.append(self.read(run_id))
+        return out
+
+    def delete(self, run_id):
+        shutil.rmtree(self.dir(run_id), ignore_errors=True)
+
+
+def default_spawn(run_id, run_dir, profile_name, checkout, tokens, plan_hash=None):
+    """The engine, as its own process, with the visitor's tokens on its stdin.
+    `plan_hash` is a Multi-Track run's: see below.
+
+    Not on the command line: /proc/<pid>/cmdline is world-readable, and a
+    credential there is a credential published to every user on the box.
+    Not in its environment either (V2-D1): the engine reads a BYOK run's keys
+    from the pipe, once, and never looks at an APIFY_TOKEN* variable or .env
+    for one — so no key of the operator's can join a visitor's pool. stdout
+    and stderr go nowhere for a paid run — a traceback from a library we do
+    not control is exactly where a token would surface.
+    """
+    if isinstance(tokens, str):         # one key, as a pre-V2-D1 caller passed it
+        tokens = [tokens]
+    env = dict(os.environ) if plan_hash is None else multi_env()
+    # This worker's own bearer token too (P4-S1C): no engine child needs the
+    # credential Render uses to reach this service.
+    for name in [n for n in env if n.startswith("APIFY_TOKEN")
+                 or n in DEVELOPER_ONLY_ENV or n == TOKEN_ENV]:
+        env.pop(name, None)
+    if plan_hash is not None:
+        # The plan the run was preflighted against (create_run). The engine
+        # rebuilds its own and, if the two differ, exits PLAN_CHANGED_EXIT
+        # before any account is read or anything fetched: the second check.
+        env[PLAN_HASH_ENV] = plan_hash
+    if tokens:
+        env["SWEEP_BYOK_CREDENTIALS"] = "stdin"
+    env["JOB_PROFILE"] = profile_name
+    # The join key between this run's status file and the engine's telemetry
+    # record, when SWEEP_SEARCH_V2_TELEMETRY is on. Inert otherwise: nothing
+    # but telemetry.start() reads it. Not a credential — it is the same run ID
+    # the status file and the run directory already carry.
+    env["SWEEP_RUN_ID"] = run_id
+    # A free run holds no credential, so its engine output is safe to keep
+    # and worth keeping: it is the only account of what the sweep did.
+    if tokens:
+        out = err = subprocess.DEVNULL
+        closer = None
+    else:
+        closer = open(os.path.join(run_dir, "engine.log"), "wb")
+        out = err = closer
+    argv = [sys.executable, "scraper.py", "--profile", profile_name, "--yes"]
+    try:
+        if not tokens:
+            return subprocess.Popen(argv, cwd=checkout, env=env, stdout=out,
+                                    stderr=err), closer
+        child = subprocess.Popen(argv, cwd=checkout, env=env, stdin=subprocess.PIPE,
+                                 stdout=out, stderr=err)
+    except Exception:
+        if closer:
+            closer.close()
+        raise
+    # A few hundred bytes: the pipe buffer takes them whole, so this never
+    # waits on the child. A child already gone has nothing to hand them to.
+    with contextlib.suppress(OSError):
+        child.stdin.write(json.dumps({"apify_tokens": list(tokens)}).encode())
+    with contextlib.suppress(OSError):
+        child.stdin.close()
+    return child, closer
+
+
+class Queue:
+    """One run at a time, FIFO behind it, recovered from disk on start."""
+
+    def __init__(self, store, spawn=None, checkout=None, clock=time.time,
+                 max_active=MAX_ACTIVE, max_waiting=None, timeout=None,
+                 kill_grace=KILL_GRACE_SECONDS):
+        self.store = store
+        self.spawn = spawn or default_spawn
+        self.checkout = checkout or CHECKOUT
+        self.clock = clock
+        self.max_active = max_active
+        self.max_waiting = max_queued() if max_waiting is None else max_waiting
+        self.timeout = run_timeout() if timeout is None else timeout
+        self.kill_grace = kill_grace
+        # run_id -> its wall-clock Timer; and the runs that ran out of it.
+        self._timers = {}
+        self._timed_out = set()
+        # Places promised by reserve() to runs still being created, so two
+        # requests racing for the last place cannot both be told yes.
+        self._pending = 0
+        self._lock = threading.RLock()
+        # run_id -> the caller's Apify tokens, held ONLY until the child has
+        # them. Never written anywhere, and gone the moment the run starts.
+        self._tokens = {}
+        # owner -> {key_id: (token, when)}, in the order they were added. A
+        # visitor pastes each key on one request and starts the run on a
+        # later one, and Render is not allowed to keep them in between — so
+        # they wait here, in memory, for as long as it takes to configure. A
+        # restart drops the lot, which is the documented behaviour: a queued
+        # paid run is interrupted and its owner asked for the keys again
+        # rather than them being persisted. Render knows each only by its id.
+        self._held = {}
+        self._children = {}
+        self._waiting = []
+
+    # -- recovery ---------------------------------------------------------
+
+    def recover(self):
+        """What a restart does to runs that were in flight.
+
+        Documented rather than clever: a child does not survive its
+        parent's restart, so anything RUNNING is interrupted and says so.
+        A QUEUED free run is re-queued in the order it arrived. A QUEUED
+        PAID run is interrupted, because its token was deliberately never
+        written down and asking the engine to start without one would
+        either fail obscurely or, far worse, reach for somebody else's.
+        """
+        with self._lock:
+            for status in sorted(self.store.all(),
+                                 key=lambda s: s.get("created_at") or 0):
+                run_id, state = status.get("run_id"), status.get("state")
+                if state == RUNNING:
+                    self.store.update(run_id, state=INTERRUPTED,
+                                      finished_at=self.clock(),
+                                      error="the worker restarted while this "
+                                            "run was in flight")
+                elif state == QUEUED:
+                    if status.get("free_only"):
+                        self._waiting.append(run_id)
+                    else:
+                        self.store.update(
+                            run_id, state=INTERRUPTED,
+                            finished_at=self.clock(),
+                            error="the worker restarted before this run "
+                                  "started, and an Apify token is never "
+                                  "kept across a restart — start it again")
+            self._pump()
+
+    # -- submission -------------------------------------------------------
+
+    def hold_token(self, owner, token, ttl=HOLD_SECONDS):
+        """Keep one of a visitor's Apify keys until they start their run.
+        Returns its id — the only name Render ever has for it. The same key
+        pasted twice is one key with one id, not two."""
+        with self._lock:
+            self._forget_stale(ttl)
+            mine = self._held.setdefault(owner, {})
+            for key_id, (held, _at) in mine.items():
+                if hmac.compare_digest(held, token):
+                    mine[key_id] = (token, self.clock())
+                    return key_id
+            if len(mine) >= MAX_KEYS:
+                raise Refused(400, f"at most {MAX_KEYS} Apify keys can be held "
+                                   f"for one sweep")
+            key_id = secrets.token_hex(KEY_ID_BYTES)
+            mine[key_id] = (token, self.clock())
+            return key_id
+
+    def held_tokens(self, owner, key_ids=None, ttl=HOLD_SECONDS):
+        """This owner's held keys, in the order added — only `key_ids`, when
+        given, and then None unless every one of them is still held: a run
+        must spend from exactly the accounts its visitor confirmed."""
+        with self._lock:
+            self._forget_stale(ttl)
+            mine = self._held.get(owner) or {}
+            if key_ids is None:
+                return [t for t, _at in mine.values()] or None
+            if not key_ids or any(k not in mine for k in key_ids):
+                return None
+            return [mine[k][0] for k in dict.fromkeys(key_ids)]
+
+    def held_token(self, owner, ttl=HOLD_SECONDS):
+        """The most recently added key, or None (the one-key view)."""
+        held = self.held_tokens(owner, ttl=ttl)
+        return held[-1] if held else None
+
+    def release_token(self, owner, key_id=None):
+        """Forget one of this owner's keys, or all of them."""
+        with self._lock:
+            if key_id is None:
+                self._held.pop(owner, None)
+            else:
+                (self._held.get(owner) or {}).pop(key_id, None)
+
+    def _forget_stale(self, ttl):
+        now = self.clock()
+        for owner, mine in list(self._held.items()):
+            for key_id in [k for k, (_t, at) in mine.items() if now - at > ttl]:
+                del mine[key_id]
+            if not mine:
+                del self._held[owner]
+
+    def reserve(self):
+        """A place for one run about to be created, or Refused(503,
+        QUEUE_FULL). Checked and taken under the queue's lock. A run that
+        will start at once needs no waiting place; one that will wait needs
+        one of `max_waiting`. The caller submits (reserved=True) or gives
+        it back with unreserve()."""
+        with self._lock:
+            free_now = max(0, self.max_active - len(self._children))
+            if len(self._waiting) + self._pending >= self.max_waiting + free_now:
+                raise Refused(503, QUEUE_FULL)
+            self._pending += 1
+
+    def unreserve(self):
+        with self._lock:
+            self._pending = max(0, self._pending - 1)
+
+    def submit(self, run_id, tokens=None, reserved=False):
+        with self._lock:
+            if reserved:
+                self._pending = max(0, self._pending - 1)
+            if tokens:
+                self._tokens[run_id] = list(tokens)
+            self._waiting.append(run_id)
+            self._pump()
+
+    def _pump(self):
+        """Start whatever the slots allow, in arrival order."""
+        while self._waiting and len(self._children) < self.max_active:
+            run_id = self._waiting.pop(0)
+            try:
+                self._start(run_id)
+            except Exception as exc:
+                self._tokens.pop(run_id, None)
+                with contextlib.suppress(Refused):
+                    self.store.update(run_id, state=FAILED,
+                                      finished_at=self.clock(),
+                                      error=f"could not start "
+                                            f"({type(exc).__name__})")
+
+    def _start(self, run_id):
+        status = self.store.read(run_id)
+        tokens = self._tokens.pop(run_id, None)  # popped: used once, then gone
+        child, closer = self.spawn(run_id, self.store.dir(run_id),
+                                   status["profile_name"], self.checkout,
+                                   tokens, **({"plan_hash": status["plan_hash"]}
+                                              if "plan_hash" in status else {}))
+        del tokens
+        self._children[run_id] = (child, closer)
+        self.store.update(run_id, state=RUNNING, started_at=self.clock())
+        timer = threading.Timer(self.timeout, self._expire, args=(run_id,))
+        timer.daemon = True
+        self._timers[run_id] = timer
+        timer.start()
+        threading.Thread(target=self._wait, args=(run_id,), daemon=True).start()
+
+    def _expire(self, run_id):
+        """The wall clock ran out on a child still running: the run fails
+        with RUN_TIMEOUT (its status keeps what it recorded — times, the
+        paid authorization, the output so far), the child is terminated, and
+        killed kill_grace seconds later if it is still there. Its slot frees
+        the moment it exits (_wait), and the next run starts. A run already
+        stopped or finished is left exactly as it is."""
+        with self._lock:
+            entry = self._children.get(run_id)
+            if entry is None:
+                return
+            try:
+                state = self.store.read(run_id).get("state")
+            except Refused:
+                state = None
+            if state != RUNNING:
+                return
+            self._timed_out.add(run_id)
+            self.store.update(run_id, state=FAILED, finished_at=self.clock(),
+                              error=RUN_TIMEOUT)
+            with contextlib.suppress(Exception):
+                entry[0].terminate()
+        log.info("run=%s %s after %ss", run_id, RUN_TIMEOUT, self.timeout)
+        killer = threading.Timer(self.kill_grace, self._kill, args=(run_id,))
+        killer.daemon = True
+        killer.start()
+
+    def _kill(self, run_id):
+        with self._lock:
+            entry = self._children.get(run_id)
+        if entry is not None and hasattr(entry[0], "kill"):
+            with contextlib.suppress(Exception):
+                entry[0].kill()
+
+    def _wait(self, run_id):
+        child, closer = self._children[run_id]
+        code = child.wait()
+        with self._lock:
+            self._children.pop(run_id, None)
+            timer = self._timers.pop(run_id, None)
+            if timer is not None:
+                timer.cancel()
+            if closer:
+                with contextlib.suppress(Exception):
+                    closer.close()
+            # A run whose directory went away while it finished (a stop
+            # racing the janitor) is not an error worth raising inside a
+            # worker thread, where nothing can catch it.
+            try:
+                status = self.store.read(run_id)
+            except Refused:
+                self._timed_out.discard(run_id)
+                self._pump()
+                return
+            if run_id in self._timed_out:
+                # Already failed with RUN_TIMEOUT; the exit code is recorded
+                # beside it, never read as the run's own outcome.
+                self._timed_out.discard(run_id)
+                self.store.update(run_id, exit_code=code)
+            elif status.get("state") == STOPPED:
+                pass  # asked for; the exit code is not news
+            else:
+                self.store.update(
+                    run_id, state=DONE if code == 0 else FAILED,
+                    finished_at=self.clock(), exit_code=code,
+                    error=None if code == 0 else
+                    PLAN_CHANGED if code == PLAN_CHANGED_EXIT and "plan_hash" in status else
+                    f"the engine exited with status {code}")
+            self._pump()
+
+    # -- control ----------------------------------------------------------
+
+    def stop(self, run_id):
+        with self._lock:
+            entry = self._children.get(run_id)
+            if entry:
+                self.store.update(run_id, state=STOPPED,
+                                  finished_at=self.clock())
+                with contextlib.suppress(Exception):
+                    entry[0].terminate()
+                return True
+            if run_id in self._waiting:
+                self._waiting.remove(run_id)
+                self._tokens.pop(run_id, None)
+                self.store.update(run_id, state=STOPPED,
+                                  finished_at=self.clock())
+                return True
+        return False
+
+    def position(self, run_id):
+        with self._lock:
+            return (self._waiting.index(run_id) + 1
+                    if run_id in self._waiting else 0)
+
+    def active(self):
+        with self._lock:
+            return len(self._children), len(self._waiting)
+
+    # -- housekeeping -----------------------------------------------------
+
+    def cleanup(self, ttl=TTL_SECONDS):
+        """Delete runs past their TTL. Never one that is queued or running:
+        a sweep somebody is watching is not old, whatever its clock says."""
+        now, removed = self.clock(), []
+        with self._lock:
+            for status in self.store.all():
+                run_id, state = status.get("run_id"), status.get("state")
+                if state in ACTIVE or run_id in self._children:
+                    continue
+                stamp = status.get("finished_at") or status.get("created_at") or now
+                if now - stamp >= ttl:
+                    # The run's rendered profile lives in the checkout's
+                    # profiles/ package, because that is how the engine
+                    # selects one. Deleting the run directory alone would
+                    # leave it there for good, and a beta that ran for a
+                    # month would leave a month of strangers' profiles.
+                    profile_path = status.get("profile_path")
+                    if profile_path:
+                        with contextlib.suppress(OSError):
+                            os.remove(profile_path)
+                    self.store.delete(run_id)
+                    removed.append(run_id)
+        return removed
+
+
+# --------------------------------------------------------------------------
+# Results
+# --------------------------------------------------------------------------
+
+def done_combos(output_dir):
+    """The engine's own ledger of finished searches, as written.
+
+    scraper.py appends one line per completed search to .done_combos, and
+    that file — not its stdout — is what the progress grid is built from.
+    A run on another machine has to hand it over for the grid to fill in.
+    """
+    path = os.path.join(output_dir, ".done_combos")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return [line.strip() for line in fh if line.strip()]
+    except OSError:
+        return []
+
+
+# scraper.READY_MARKER. The engine renames it into place once the CSV, the
+# JSON and the seen ledger are final, when SWEEP_RESULTS_READY_EARLY is set
+# in its environment — which is this process's, see default_spawn.
+READY_MARKER = ".results_ready"
+
+
+def results_ready(output_dir):
+    """The engine's word that the result is final, as status fields.
+
+    Result availability, NOT execution: the child may still be running,
+    the run stays RUNNING, and nothing in Queue reads this — the slot, the
+    queue behind it and the janitor all still wait for the process to exit.
+    Absent rather than false without a marker, so a run that never published
+    one reports exactly what it always did, and Render waits for DONE.
+    """
+    try:
+        with open(os.path.join(output_dir, READY_MARKER), encoding="utf-8") as fh:
+            at = json.load(fh)["at"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+    if not isinstance(at, (int, float)) or isinstance(at, bool):
+        return {}
+    return {"results_ready": True, "results_ready_at": at}
+
+
+def paid_authorization(output_dir):
+    """The engine's word on how much of the paid plan it could authorise
+    (V2-D1): full, partial by the visitor's choice, or refused before any
+    start. Absent without a record; only AUTH_FIELDS, never anything else."""
+    try:
+        with open(os.path.join(output_dir, AUTH_RECORD), encoding="utf-8") as fh:
+            record = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(record, dict):
+        return {}
+    return {"paid_authorization": {
+        k: record[k] for k in AUTH_FIELDS
+        if k in record and (record[k] is None
+                            or isinstance(record[k], (str, int, float, bool)))}}
+
+
+# The last parse of each run's newest CSV, keyed by output directory and
+# stamped with the file's path, mtime and size (P4-S1C): Render walks a run's
+# rows a page at a time, and each page used to re-read and re-parse the whole
+# file. A file the engine has rewritten since has a new stamp and is read
+# again, so a page is never older than the file it came from.
+_PARSED = {}
+_PARSED_LOCK = threading.Lock()
+MAX_PARSED = 8
+
+
+def rows_since(output_dir, since=0, limit=500):
+    """Rows the engine has written so far, newest file first.
+
+    The engine writes jobs_<stamp>.csv as it goes, which is what makes a
+    live feed possible without this worker parsing the child's stdout.
+    """
+    files = sorted(glob.glob(os.path.join(output_dir, "**", "*.csv"),
+                             recursive=True), key=os.path.getmtime)
+    if not files:
+        return [], 0
+    try:
+        stat = os.stat(files[-1])
+    except OSError:
+        return [], 0
+    stamp = (files[-1], stat.st_mtime_ns, stat.st_size)
+    with _PARSED_LOCK:
+        held = _PARSED.get(output_dir)
+    if held is not None and held[0] == stamp:
+        rows = held[1]
+    else:
+        try:
+            with open(files[-1], newline="", encoding="utf-8-sig") as fh:
+                rows = list(csv.DictReader(fh))
+        except (OSError, csv.Error, UnicodeDecodeError):
+            return [], 0
+        with _PARSED_LOCK:
+            _PARSED.pop(output_dir, None)
+            _PARSED[output_dir] = (stamp, rows)
+            while len(_PARSED) > MAX_PARSED:
+                del _PARSED[next(iter(_PARSED))]
+    return rows[since:since + limit], len(rows)
+
+
+# --------------------------------------------------------------------------
+# The service
+# --------------------------------------------------------------------------
+
+def accepted_tokens(env=None):
+    env = os.environ if env is None else env
+    raw = (env.get(TOKEN_ENV) or "").strip()
+    tokens = {t.strip() for t in raw.split(",") if t.strip()}
+    if not tokens:
+        raise SystemExit(
+            f"{TOKEN_ENV} is not set. This worker starts sweeps that spend a "
+            f"visitor's money; it will not run without a bearer token.")
+    return tokens
+
+
+def create_app(store=None, queue=None, accepted=None, checkout=None,
+               clock=time.time):
+    app = Flask(__name__)
+    # Flask sorts JSON keys by default, which turned a plan's sites (the engine
+    # runs them in config.SITES order: linkedin, then indeed) alphabetical on
+    # the way to Render: its running screen then named the wrong search as the
+    # one in flight, and its partial-sweep prefix was priced in another order.
+    app.json.sort_keys = False
+    app.config["MAX_CONTENT_LENGTH"] = MAX_BODY
+    store = store if store is not None else RunStore()
+    checkout = checkout or CHECKOUT
+    queue = queue if queue is not None else Queue(store, checkout=checkout,
+                                                  clock=clock)
+    accepted = accepted if accepted is not None else accepted_tokens()
+    app.store, app.queue, app.checkout = store, queue, checkout
+
+    def authorised():
+        """Every endpoint, health included. Only Render calls this service,
+        and an unauthenticated route is a route somebody else can map."""
+        header = request.headers.get("Authorization", "")
+        given = header[7:] if header.startswith("Bearer ") else ""
+        return any(hmac.compare_digest(given, t) for t in accepted)
+
+    def owned(run_id):
+        """The run, if the caller owns it. A stranger gets the same answer
+        as someone asking for a run that does not exist: 404, not 403,
+        which would confirm the id."""
+        status = store.read(run_id)
+        given = request.headers.get("X-Sweep-Owner", "")
+        if not given or not hmac.compare_digest(given, status.get("owner", "")):
+            raise Refused(404, "no such run")
+        return status
+
+    def public(status):
+        """What Render may see. No token — there is none to leak here,
+        because one was never written to this file."""
+        output_dir = store.output_dir(status["run_id"])
+        return {k: v for k, v in status.items() if k != "owner"} | {
+            "queue_position": queue.position(status["run_id"]),
+            # The finished-search ledger, so the progress grid on the other
+            # side can fill in as each search completes.
+            "done": done_combos(output_dir)} | results_ready(output_dir) | (
+                paid_authorization(output_dir))
+
+    @app.errorhandler(Refused)
+    def refused(exc):
+        return jsonify({"error": {"message": exc.message}}), exc.status
+
+    def _json_body():
+        """The request's JSON, or None for anything that is not JSON this
+        worker will read (P4-S1C). get_json(silent=True) already turns a
+        parse error into None; a body nested past the recursion limit
+        escaped it as a RecursionError and a 500. Now it is None too, and
+        every route's own validator answers 400. The 512 KiB cap is still
+        MAX_CONTENT_LENGTH's 413."""
+        try:
+            return request.get_json(silent=True)
+        except RecursionError:
+            return None
+
+    @app.errorhandler(RecursionError)
+    def too_deep(_exc):
+        """The same answer for nesting that only bites later, in a validator
+        or the renderer: a refusal, never a traceback."""
+        return jsonify({"error": {"message": "the request is nested too deeply"}}), 400
+
+    @app.before_request
+    def gate():
+        if not authorised():
+            return jsonify({"error": {"message": "a bearer token is required"}}), 401
+        return None
+
+    @app.get("/healthz")
+    def healthz():
+        running, waiting = queue.active()
+        return jsonify({"status": "ok", "running": running, "queued": waiting,
+                        "max_active": queue.max_active,
+                        # P4-S1B, behind the bearer like every route here.
+                        "active_runs": running, "queued_runs": waiting,
+                        "queue_limit": queue.max_waiting,
+                        "run_timeout_seconds": queue.timeout})
+
+    @app.post("/v1/tokens")
+    def hold_token():
+        """Take one visitor's Apify key and keep it in memory for them.
+
+        Render is not allowed to hold it between requests, and it is not
+        written here either: not to status, not to a log, not to disk. It
+        waits in this process until that owner starts a run, and a restart
+        loses it on purpose — see Queue.recover.
+        """
+        body = _json_body()
+        if not isinstance(body, dict):
+            raise Refused(400, "the request body must be an object")
+        owner, token = body.get("owner"), body.get("apify_token")
+        if not isinstance(owner, str) or not 1 <= len(owner) <= MAX_OWNER:
+            raise Refused(400, "owner must be a short opaque string")
+        if not isinstance(token, str) or not token.strip():
+            raise Refused(400, "apify_token must be a non-empty string")
+        key_id = queue.hold_token(owner, token.strip())
+        del token
+        # No token, no owner, no length: nothing here that could narrow a
+        # search for one.
+        log.info("a caller's key is held for one run")
+        return jsonify({"held": True, "key_id": key_id}), 201
+
+    @app.delete("/v1/tokens/<key_id>")
+    def release_token(key_id):
+        """Forget one of this visitor's held keys (they removed it before
+        starting). Idempotent: a key already gone is the state asked for."""
+        owner = request.headers.get("X-Sweep-Owner", "")
+        if not 1 <= len(owner) <= MAX_OWNER:
+            raise Refused(400, "owner must be a short opaque string")
+        queue.release_token(owner, key_id)
+        return jsonify({"released": True})
+
+    @app.post("/v1/plans")
+    def price_plan():
+        """What this profile would search, from the engine's own dry run.
+
+        Public mode cannot price a paid sweep by guessing: the estimate is
+        the number a visitor approves before spending their money, so it
+        comes from the same --dry-run the console uses. Nothing is run and
+        nothing is billed.
+        """
+        payload = _json_body()
+        if is_multi(payload):
+            return jsonify(price_tracks(payload))
+        profile, prefs, free_only, _token, _owner, _key_ids = _checked(payload)
+        engine = _requested_engine(payload, checkout)
+        make_profile = _import_make_profile(checkout)
+        name = f"plan_{secrets.token_hex(8)}"
+        path = os.path.join(checkout, "profiles", f"{name}.py")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(render_profile(
+                make_profile, name, profile,
+                free_prefs(prefs, checkout) if free_only else prefs,
+                os.path.join(store.root, "_plans", name), engine))
+        try:
+            out = subprocess.run(
+                [sys.executable, "scraper.py", "--profile", name,
+                 "--dry-run", "--json"]
+                # A caller that named an engine is told which one the engine
+                # actually bound, from the file it loaded; one that did not
+                # gets today's dry run, byte for byte.
+                + (["--attest-engine"] if engine is not None else []),
+                cwd=checkout, capture_output=True, text=True, timeout=120,
+                # A dry run prices; it must not be able to reach an account,
+                # nor hold this worker's own bearer token (P4-S1C).
+                env={k: v for k, v in os.environ.items()
+                     if not k.startswith("APIFY_TOKEN") and k != TOKEN_ENV})
+            if out.returncode != 0:
+                raise Refused(502, "the engine could not price that plan")
+            return jsonify(json.loads(out.stdout))
+        except (ValueError, subprocess.SubprocessError) as exc:
+            raise Refused(502, f"the engine could not price that plan "
+                               f"({type(exc).__name__})") from None
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(path)
+
+    def price_tracks(payload):
+        """/v1/plans for a Multi-Track Sweep: the engine's dry run of the
+        tracks as sent, plan_hash and all — what a visitor approves, and what
+        a /v1/runs expected_plan_hash then names."""
+        tracks, prefs, free_only, *_rest = _checked_tracks(payload)
+        make_profile = _import_make_profile(checkout)
+        name = f"plan_{secrets.token_hex(8)}"
+        path = os.path.join(checkout, "profiles", f"{name}.py")
+        source = render_tracks_profile(make_profile, name, tracks,
+                                       free_prefs(prefs, checkout) if free_only else prefs,
+                                       os.path.join(store.root, "_plans", name))
+        with open(path, "w", encoding="utf-8", opener=_private) as fh:
+            fh.write(source)
+        try:
+            return schema2_plan(checkout, name)
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(path)
+
+    @app.post("/v1/runs")
+    def create_run():
+        payload = _json_body()
+        multi = is_multi(payload)
+        if multi:
+            tracks, prefs, free_only, token, owner, key_ids, expected = (
+                _checked_tracks(payload, run=True))
+        else:
+            profile, prefs, free_only, token, owner, key_ids = _checked(payload)
+            engine = _requested_engine(payload, checkout)
+        if not free_only and not public_paid_enabled():
+            raise Refused(503, "paid sweeps are temporarily unavailable")
+        tokens = [token] if token else None
+        if not free_only and not tokens:
+            # The keys the visitor pasted on earlier requests, waiting in
+            # memory — exactly the ones Render names, frozen here for the
+            # life of the run. Never this worker's own and never the
+            # operator's: a paid run is funded by whoever asked for it or it
+            # does not happen.
+            tokens = queue.held_tokens(owner, key_ids)
+        if not free_only and not tokens:
+            raise Refused(409, "no Apify key is held for this visitor — "
+                               "ask them for it again")
+        # P4-S1B: a place in the line before anything of the run exists and
+        # before any held key is spent. Full is 503 QUEUE_FULL; the keys are
+        # untouched, so the visitor can try again while they are held.
+        try:
+            queue.reserve()
+        except Refused:
+            log.info("run refused: %s", QUEUE_FULL)
+            raise
+        try:
+            make_profile = _import_make_profile(checkout)
+            run_id = secrets.token_hex(RUN_ID_BYTES)
+            profile_name = f"beta_{run_id}"
+            run_dir = store.dir(run_id)
+            output_dir = store.output_dir(run_id)
+            if multi:
+                # Refused, if at all, before anything of the run exists.
+                source = render_tracks_profile(make_profile, profile_name, tracks,
+                                               free_prefs(prefs, checkout) if free_only
+                                               else prefs, output_dir)
+            os.makedirs(output_dir, exist_ok=True)
+
+            if not multi:
+                source = render_profile(make_profile, profile_name, profile,
+                                        free_prefs(prefs, checkout) if free_only
+                                        else prefs, output_dir, engine)
+            opener = _private if multi else None
+            # Into the checkout's profiles/ package, because that is how the
+            # engine selects one. Named by run id, so two visitors cannot
+            # collide and neither can reach the operator's own profiles.
+            profile_path = os.path.join(checkout, "profiles", f"{profile_name}.py")
+            with open(profile_path, "w", encoding="utf-8", opener=opener) as fh:
+                fh.write(source)
+            with open(os.path.join(run_dir, "profile.py"), "w",
+                      encoding="utf-8", opener=opener) as fh:
+                fh.write(source)
+
+            multi_status = {}
+            if multi:
+                try:
+                    multi_status = {"schema": 2, "track_ids": [t["id"] for t in tracks],
+                                    "plan_hash": preflight(checkout, profile_name, expected)}
+                except Exception:
+                    # No run: nothing started, and nothing of it is left behind.
+                    with contextlib.suppress(OSError):
+                        os.remove(profile_path)
+                    store.delete(run_id)
+                    raise
+
+            store.write(run_id, {
+                "run_id": run_id, "owner": owner, "state": QUEUED,
+                "created_at": clock(), "started_at": None, "finished_at": None,
+                "free_only": free_only, "profile_name": profile_name,
+                "profile_path": profile_path, "exit_code": None, "error": None,
+                **multi_status,
+            })
+        except BaseException:
+            queue.unreserve()
+            raise
+        queue.submit(run_id, tokens, reserved=True)
+        del token, tokens
+        if not free_only:
+            # Used once. A second run needs the keys pasted again, which is
+            # the same rule a restart enforces.
+            queue.release_token(owner)
+        # The id is opaque and is not, on its own, authority: every read
+        # still needs this worker's bearer token AND the owner string.
+        log.info("run=%s created free_only=%s", run_id, free_only)
+        return jsonify({"run_id": run_id}), 201
+
+    @app.get("/v1/runs/<run_id>")
+    def run_status(run_id):
+        return jsonify(public(owned(run_id)))
+
+    @app.get("/v1/runs/<run_id>/rows")
+    def run_rows(run_id):
+        owned(run_id)
+        try:
+            since = max(0, int(request.args.get("since") or 0))
+        except ValueError:
+            raise Refused(400, "since must be a whole number") from None
+        rows, total = rows_since(store.output_dir(run_id), since)
+        return jsonify({"rows": rows, "total": total, "since": since})
+
+    @app.post("/v1/runs/<run_id>/stop")
+    def run_stop(run_id):
+        owned(run_id)
+        queue.stop(run_id)
+        return jsonify(public(store.read(run_id)))
+
+    return app
+
+
+def janitor(queue, every=3600, ttl=TTL_SECONDS, stop=None):
+    """Delete expired runs on a timer. Started by main(), not by
+    create_app, so a test never grows a background thread it did not ask
+    for."""
+    stop = stop or threading.Event()
+
+    def loop():
+        while not stop.wait(every):
+            with contextlib.suppress(Exception):
+                for run_id in queue.cleanup(ttl):
+                    log.info("run=%s deleted (past ttl)", run_id)
+
+    threading.Thread(target=loop, daemon=True).start()
+    return stop
+
+
+def check_checkout(checkout=None):
+    """Refuse to start against a checkout this cannot run a sweep from.
+
+    A worker that boots and then 500s on the first visitor is worse than
+    one that does not boot: the failure surfaces in front of somebody's
+    résumé rather than in the deploy that caused it.
+    """
+    checkout = checkout or CHECKOUT
+    # The FILE, not merely a successful import: once make_profile is in
+    # sys.modules an import proves nothing about this checkout, which is
+    # exactly how a bad one reached a live request the first time.
+    renderer = os.path.join(checkout, "auto-apply", "make_profile.py")
+    if not os.path.isfile(renderer):
+        raise SystemExit(
+            f"{renderer} is missing. The worker renders every run's profile "
+            f"with make_profile, so the checkout has to be the whole repo.")
+    profiles = os.path.join(checkout, "profiles")
+    if not os.path.isdir(profiles) or not os.access(profiles, os.W_OK):
+        raise SystemExit(
+            f"{profiles} must exist and be writable: the engine selects a "
+            f"profile by module name, so each run's profile is written "
+            f"there.")
+    # Last, because it has a side effect the checks above do not: it puts
+    # this checkout on sys.path for the life of the process.
+    try:
+        _import_make_profile(checkout)
+    except ImportError as exc:
+        raise SystemExit(f"the checkout at {checkout} has make_profile but "
+                         f"it will not import ({exc}).") from None
+    return checkout
+
+
+def main():
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s")
+    check_checkout()
+    store = RunStore()
+    queue = Queue(store)
+    queue.recover()
+    janitor(queue)
+    return create_app(store=store, queue=queue)
+
+
+if __name__ == "__main__":
+    main().run(host="127.0.0.1", port=8812)

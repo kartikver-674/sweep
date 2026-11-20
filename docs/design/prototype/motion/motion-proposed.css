@@ -1,0 +1,91 @@
+/* D7A motion prototype: the proposed layer for Results. Loaded AFTER sweep.css; sweep.css is untouched.
+
+   One idea: motion says what changed, and only that. The heading, the tabs and the tools are readable at
+   t = 0 and never animate. What moves is the list, and only when it is news: arriving (rows written in, top
+   first), a wait that ended (an answer that was slow un-dims), or a tool panel opening. A quick move between
+   views is an instant swap. Everything that moves is inside `no-preference`; with reduced motion nothing moves
+   and the page is the same page.
+
+   Tokens in three layers, as the design-system skill lays them out: primitives, then the meaning, then where it is
+   used. Every token below is used. Durations and distances were chosen on the built screens (D7 note, section 4). */
+
+:root {
+  /* primitives */
+  --ms-2: 160ms;
+  --ms-3: 200ms;
+  /* the curve sweep.css already uses for the activity fill and the rail: fast off the mark, settling */
+  --ease-settle: cubic-bezier(.22, .61, .36, 1);
+  --ease-leave: cubic-bezier(.4, 0, 1, 1);
+
+  /* meaning */
+  --row-fade: 140ms;        /* one row writing in */
+  --row-step: 20ms;         /* between rows; the cap below makes the whole arrival 140 + 7 * 20 = 280 ms */
+  --tool-in: var(--ms-3);   /* a tool panel opening */
+  --tool-out: 140ms;        /* and closing: leaving is quicker than arriving */
+  /* .85, not .7. On the ground colour the muted caption text (--slate, 5.84:1) is 4.54:1 at .85 and 3.45:1 at .7,
+     which is below AA, and a slow answer can hold the dim for seconds. Body text is 7.5:1 and warm text 5.8:1 even at
+     .7, so .7 is an owner option that costs the captions their AA while it lasts (D7 note, section 15.6). D1's floor
+     for any dimmed text is .7 (direction, 4.5 A3); D2 then removed the persistent dimming rather than use it. */
+  --pending-dim: .85;
+}
+
+/* ---- The entrance that used to replay -------------------------------------------------------------------
+   sweep.css fades every section in (320 ms, 80 ms apart) on EVERY load of Results: a tab, a filter, a sort
+   and a reload all replayed it, which read as the page blinking. The rule is gone here; the arrival below
+   replaces it. */
+.reveal, .reveal.r2, .reveal.r3 { animation: none; }
+
+@media (prefers-reduced-motion: no-preference) {
+
+  /* ---- Arrival: from anywhere that is not /results ------------------------------------------------------
+     `html.arrive` is set by a head script and removed 500 ms after the first frame (see
+     build_fixtures.HEAD_SCRIPT). It is a property of the DOCUMENT'S FIRST MOMENTS, not of the rows, so a row that
+     is replaced later never replays it. The first eight rows of the first section (three on a phone); everything
+     else is simply there. Opacity only: a transform on a table row is not reliable in every engine, and nothing
+     needs to travel. If the first section has fewer than eight rows the later sections are static. */
+  @keyframes row-in { from { opacity: 0; } }
+  .arrive #results-body > .jobs-section:first-child .jobs tbody tr:nth-child(-n + 8) {
+    animation: row-in var(--row-fade) var(--ease-settle) both;
+    animation-delay: calc(var(--i) * var(--row-step));
+  }
+  .jobs tbody tr:nth-child(1) { --i: 0; } .jobs tbody tr:nth-child(2) { --i: 1; }
+  .jobs tbody tr:nth-child(3) { --i: 2; } .jobs tbody tr:nth-child(4) { --i: 3; }
+  .jobs tbody tr:nth-child(5) { --i: 4; } .jobs tbody tr:nth-child(6) { --i: 5; }
+  .jobs tbody tr:nth-child(7) { --i: 6; } .jobs tbody tr:nth-child(8) { --i: 7; }
+  /* A phone shows about two cards: three is plenty, and the whole arrival is 180 ms. */
+  @media (max-width: 47.99rem) {
+    .arrive #results-body > .jobs-section:first-child .jobs tbody tr:nth-child(n + 4) { animation: none; }
+  }
+
+  /* ---- A slow answer: dim, and then un-dim ---------------------------------------------------------------
+     Moving between views is a navigation (a tab, a filter, a sort, "Show all"). A quick answer is an instant swap,
+     with no motion at all: the cross-fade that would soften it cannot be had without a view transition, and that
+     swallows a second press (motion-vt-alt.css; D7 note, section 9). A slow answer is different: after 160 ms the
+     old list dims (never blanked: it is still the best information there is, and the same convention .updating
+     already uses for the price), and when the new page arrives it starts at that dim level and settles to full in
+     160 ms, so the wait ends with the same cue it began with instead of a pop. `html.swap` is set on the new page
+     only if the old one had dimmed. An ordinary animation on the live page, so a press during it is handled. */
+  @keyframes list-in { from { opacity: var(--pending-dim); } }
+  .swap .results-body { animation: list-in var(--ms-2) var(--ease-settle) both; }
+  .results-body { transition: opacity var(--ms-2) var(--ease-settle); }
+
+  /* ---- Tool panels (Filter and sort, Export): a short reveal in place ---------------------------------
+     Alpine adds and removes these classes (x-transition:*), and they exist only for the length of the move.
+     Height, the row gap above and opacity travel together, so the list below is pushed down smoothly instead
+     of jumping. `interpolate-size` lets Chromium animate height to and from auto; a browser without it (Safari
+     and Firefox today) opens with the fade and closes at once. Height was measured, not assumed: on the 19-row and
+     the 240-row page at 1x and 6x CPU slowdown it cost at most a small amount (mean frame 9.1 ms against 7.7 ms
+     for opacity in the worst cell, 240 rows at 6x; D7 note, section 13). Leaving is
+     quicker than arriving. The classes are inside `no-preference` so Alpine's one-frame "start" state is never
+     painted for a reader who asked for no motion. */
+  .tool-panel { interpolate-size: allow-keywords; }
+  .t-in, .t-out { overflow: clip; }
+  .t-in { transition: height var(--tool-in) var(--ease-settle), margin-top var(--tool-in) var(--ease-settle), opacity var(--tool-in) var(--ease-settle); }
+  .t-out { transition: height var(--tool-out) var(--ease-leave), margin-top var(--tool-out) var(--ease-leave), opacity var(--tool-out) var(--ease-leave); }
+  /* margin-top cancels the flex row gap (.bar's --s3) that appears with the panel, so there is no pop at the start */
+  .t-from { opacity: 0; height: 0; margin-top: calc(-1 * var(--s3)); }
+  .t-to { opacity: 1; height: auto; margin-top: 0; }
+}
+
+/* The state itself is not motion, so it is the same with reduced motion: dim, instantly. */
+.pending .results-body { opacity: var(--pending-dim); }

@@ -1,0 +1,321 @@
+{% extends "base.html" %}
+{% from "_a.html" import peek, tip %}
+{# The coverage diagram (public only), one drawing for two places: the choice (kind 'choose', which follows the radios) and the Deep setup
+   beside its card on a wide screen (kind 'setup': Deep, the boards waiting until the paste step). Decoration both times: the caller keeps it
+   aria-hidden, and the one live region (the sentence under the cards) is not part of it. #}
+{% macro orbit(kind, key_err=false, firm=false) -%}
+<div class="orbit-box{% if kind == 'setup' %} is-deep setup-box{% if firm %} firm{% endif %}{% elif key_err %} is-deep{% endif %}"
+     {% if kind != 'setup' %}:class="{ 'is-deep': mode === 'deep' }" {% endif %}aria-hidden="true">
+            <div class="orbit-ring outer"></div>
+            <div class="orbit-ring inner"></div>
+            <div class="orbit-core">Your résumés</div>
+            <div class="orbit-spin n{{ paid|length }}">
+              {%- for board in paid %}
+              <div class="orbit-pt out"><span class="o-chip out">{{ board }}</span></div>
+              {%- endfor %}
+            </div>
+            <div class="orbit-pt in1"><span class="o-chip in">Career pages</span></div>
+            <div class="orbit-pt in2"><span class="o-chip in">Public boards</span></div>
+          </div>
+{%- endmacro %}
+{#- The tick in a check line (K2): the dot, and the mark that shows once the fact is in. #}
+{% macro tick() -%}
+<span class="dot" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 18 18" focusable="false"><path d="M3.5 9.5 L7.5 13 L14.5 5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+{%- endmacro %}
+{% block title %}{% if public_mode %}How should Sweep search?{% else %}Free or paid{% endif %} — Sweep{% endblock %}
+{# Public only: the diagram's parallax (decoration; a pointer that hovers, motion allowed). Nothing for the console, whose page is unchanged. #}
+{% block head %}{% if public_mode %}<script defer src="{{ url_for('static', filename='orbit.js') }}"></script>{% endif %}{% endblock %}
+{% block body %}
+<div class="stack">
+  {% if public_mode %}
+    {# ---- The public fork, A6 ---------------------------------------------------
+       One question ("how wide should we sweep?"), two radio cards, and a diagram of
+       what each one searches; the Apify key sits one step behind Deep Sweep and is
+       asked for one thing at a time.
+
+       One Alpine scope round the page. `mode` is the radio choice, `setup` is
+       whether the Deep guide is open, `step` is which of its three steps shows. A
+       rejected key (`key_err`) lands with Deep chosen and the paste step open, the
+       error beside the field it was about.
+
+       WITHOUT a script nothing is hidden: the choose view, then the guide with all
+       three steps in order and the key form, exactly the plain page. WITH one,
+       theme.js has put `js` on <html> before first paint and only then do the
+       `.away`, `:not(.open)` and `:not(.on)` rules hide anything (sweep-a.css, A6).
+       The server writes the starting classes so the first paint is already right;
+       Alpine only takes them over. No x-cloak: it would hide these without a script.
+
+       The two radios are not in either form and are never submitted. Both forms
+       are the forms they were: the Quick one posts to key_free, the key one to key,
+       and the key is never put back in the page. #}
+    {# Only a refusal of the key itself (POST /key) reopens the paste step. The other errors this
+       screen shows (Quick's profile rewrite, the plan and run limits) are not about a key: they
+       stay on the choice, above the cards. #}
+    {% set key_err = error and request.endpoint == 'key_post' %}
+    {#- K2: a key just checked comes back here (GET /key?checked) with the setup open on its last step, which then shows what
+       the check found and the way on to the plan. Opened like a refused key: Deep chosen, the guide on the paste step. The plan
+       screen's "Add another Apify key" (GET /key?add, T2) opens the same way, on the paste step. #}
+    {% set deep_open = key_err or checked or adding %}
+    {% set s0 = 3 if deep_open else 1 %}
+    <div class="cov-page"
+         x-data="{ mode: '{{ 'deep' if deep_open else 'quick' }}', setup: {{ 'true' if deep_open else 'false' }}, step: {{ s0 }} }">
+
+      <section class="cov-choose{% if deep_open %} away{% endif %}" :class="{ away: setup }" aria-labelledby="cov-h">
+        <div class="stack-tight cov-top">
+          <span class="eyebrow">Step 3 · coverage</span>
+          <h1 id="cov-h">How wide should we <span class="scrib">sweep</span>?</h1>
+          <p class="lede">Same ranking either way. Deep Sweep adds {{ paid|join(', ') }}.</p>
+          {% if error and not key_err %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+        </div>
+
+        <div class="cov">
+          <div class="cov-main">
+            <fieldset class="cov-choices">
+              <legend class="visually-hidden">Choose a sweep</legend>
+              <label class="choice q"><input type="radio" name="sweep-mode" value="quick" x-model="mode"{% if not deep_open %} checked{% endif %}>
+                <span><span class="nm">Quick Sweep</span><span class="ds">Company career pages and public job boards. Free, no setup.</span></span></label>
+              <label class="choice d"><input type="radio" name="sweep-mode" value="deep" x-model="mode" x-ref="deepradio"{% if deep_open %} checked{% endif %}>
+                <span><span class="nm">Deep Sweep</span><span class="ds">Everything in Quick, plus {{ paid|join(', ') }} — on your own free Apify account.</span></span>
+                <span class="sticker cit" aria-hidden="true">+{{ paid|length }} big boards</span></label>
+            </fieldset>
+
+            {# Quick is the form that works without a script. With one, the CTA follows
+               the radios: Quick shows this form, Deep shows the button that opens the guide. #}
+            <div class="cov-cta">
+              <form class="cov-quick{% if not deep_open %} on{% endif %}" :class="{ on: mode === 'quick' }"
+                    method="post" action="{{ url_for('key_free') }}"
+                    x-data="{ sent: false }" @submit="sent = true">
+                <div class="actions">
+                  <button class="primary big" type="submit"
+                          :disabled="sent">Start Quick Sweep<span class="go"
+                          aria-hidden="true">&rarr;</span></button>
+                  <span class="meta sending" x-show="sent" x-cloak aria-live="polite">Setting
+                    up your search…</span>
+                </div>
+              </form>
+              <button type="button" class="primary big cov-deepgo js-only{% if deep_open %} on{% endif %}" :class="{ on: mode === 'deep' }"
+                      aria-controls="deep-setup"
+                      @click="setup = true; step = 1; $nextTick(() => $refs.setuph.focus())">Set up Deep Sweep<span class="go"
+                      aria-hidden="true">&rarr;</span></button>
+            </div>
+
+            {# Four facts and no more: what Apify is, whose account pays, roughly
+               what it costs, and that the cost is shown first. No actors, no
+               credits, no rate basis, no per-event billing. #}
+            {% call peek("Does Deep Sweep cost money?") %}
+              <p>Sweep can also search {{ paid|join(', ') }}. Those boards are read
+                through <b>Apify</b>, a service that runs the searches for you and
+                charges per search.</p>
+              <p>Apify’s free plan includes $5 in monthly credits, with no card
+                required. Actual search usage varies, and you see the estimated cost
+                before anything runs.</p>
+              <p class="muted">Sweep uses <b>your own</b> Apify account, so the
+                searches are billed to you and never to us. You will see the
+                estimated cost before anything runs, and nothing is charged until
+                you start the sweep.</p>
+            {% endcall %}
+          </div>
+
+          {# The diagram is decoration (aria-hidden); the sentence beside it says what the chosen
+             sweep searches, and is the live region. Outer chips are the paid boards, one each,
+             spread round the ring from the top (by the spin's n<count> class, sweep-a.css); Deep pops them in and slowly orbits them. #}
+          <span class="visually-hidden" aria-live="polite"
+                x-text='mode === "deep" ? {{ ("Deep Sweep searches company career pages and public job boards, plus " ~ paid|join(", ") ~ ".")|tojson }} : {{ "Quick Sweep searches company career pages and public job boards."|tojson }}'>{% if deep_open %}Deep Sweep searches company career pages and public job boards, plus {{ paid|join(', ') }}.{% else %}Quick Sweep searches company career pages and public job boards.{% endif %}</span>
+          {{ orbit('choose', deep_open) }}
+        </div>
+      </section>
+
+      {# The guide. Without a script it is always here, under the choice, all three steps in
+         order; with one it opens from "Set up Deep Sweep" and shows one step at a time. The
+         paste step is the key form (below); steps 1 and 2 are only links, so they hold no secret. #}
+      {# On a wide screen the setup has the diagram beside it, in its Deep state: the three boards "waiting" (dashed, dimmed) until the paste step,
+         then solid. A second aria-hidden drawing, no live region; with no script, and on a phone, it is not drawn (sweep-a.css, A6). #}
+      <div class="cov-setup-row{% if deep_open %} open{% endif %}" :class="{ open: setup }">
+      <section class="cov-setup{% if deep_open %} open{% endif %}" :class="{ open: setup }" id="deep-setup" aria-labelledby="deep-h">
+        <div class="cov-setup-top">
+          <button type="button" class="tertiary js-only"
+                  @click="setup = false; $nextTick(() => $refs.deepradio.focus())">&larr; Back to the options</button>
+          <h2 id="deep-h" tabindex="-1" x-ref="setuph">Three more boards, <span class="scrib">one key</span>.</h2>
+        </div>
+
+        <div class="wnav js-only">
+          <span class="wdots" aria-hidden="true">
+            <i class="{{ 'on' if s0 == 1 else 'ok' }}" :class="{ on: step === 1, ok: step > 1 }"></i>
+            <i class="{{ 'on' if s0 == 2 else 'ok' if s0 > 2 else '' }}" :class="{ on: step === 2, ok: step > 2 }"></i>
+            <i class="{{ 'on' if s0 == 3 else '' }}" :class="{ on: step === 3 }"></i>
+          </span>
+          <span class="wcount">Step <span x-text="step">{{ s0 }}</span> of 3</span>
+        </div>
+
+        <ol class="wsteps">
+          <li class="wstep{% if s0 == 1 %} open{% endif %}" :class="{ open: step === 1 }">
+            <div class="wstep-head">
+              <h3 tabindex="-1">Grab a free Apify account</h3>
+              <span class="sticker">$5 free every month</span>
+            </div>
+            <p>Apify runs the {{ paid|join(', ') }} searches, on your own account. The free
+              plan includes $5 of credit every month — no card.</p>
+            <a class="primary big" href="https://apify.com/sign-up"
+               target="_blank" rel="noopener noreferrer">Sign up at
+              apify.com<span class="go" aria-hidden="true">&nearr;</span></a>
+            {% if apify_guide['1-signup'] %}
+              <figure class="shot">
+                <img src="{{ url_for('static', filename=apify_guide['1-signup']) }}"
+                     loading="lazy" decoding="async" width="1200"
+                     alt="The apify.com home page. Log in and Get started
+                          are at the top right.">
+              </figure>
+            {% endif %}
+            <div class="go-row js-only">
+              <button type="button" class="secondary"
+                      @click="step = 2; $nextTick(() => $refs.step2.focus())">I already have one<span class="go"
+                      aria-hidden="true">&rarr;</span></button>
+              <button type="button" class="tertiary"
+                      @click="step = 3; $nextTick(() => $refs.step3.focus())">Already have a key? Paste it</button>
+            </div>
+          </li>
+
+          <li class="wstep{% if s0 == 2 %} open{% endif %}" :class="{ open: step === 2 }">
+            <h3 tabindex="-1" x-ref="step2">Copy your API token</h3>
+            <p>Signed in? This opens the right page — Settings, then API &amp; Integrations.</p>
+            <a class="primary big"
+               href="https://console.apify.com/settings/integrations"
+               target="_blank" rel="noopener noreferrer">Open my Apify
+              tokens<span class="go" aria-hidden="true">&nearr;</span></a>
+            {% if apify_guide['2-console'] %}
+              <figure class="shot">
+                <img src="{{ url_for('static', filename=apify_guide['2-console']) }}"
+                     loading="lazy" decoding="async" width="1200"
+                     alt="The apify.com home page once signed in, with Go
+                          to Console at the top right.">
+              </figure>
+            {% else %}
+              <div class="mocktok" aria-hidden="true"><span class="crumb">Settings › API &amp; Integrations</span><b>Personal API token</b><span class="dotsrow">••••••••••</span><span class="cp">Copy</span></div>
+            {% endif %}
+            <p class="muted">Copy the Personal API token with the button beside it. Apify calls it
+              the token created on sign-up — that is the one.</p>
+            <div class="go-row js-only">
+              <button type="button" class="secondary"
+                      @click="step = 3; $nextTick(() => $refs.step3.focus())">I’ve copied it<span class="go"
+                      aria-hidden="true">&rarr;</span></button>
+            </div>
+          </li>
+
+          <li class="wstep{% if s0 == 3 %} open{% endif %}" :class="{ open: step === 3 }">
+            <h3 tabindex="-1" x-ref="step3">{{ 'Your key checks out' if checked else 'Paste it here' }}</h3>
+            {%- set unlocked = and_list(paid) ~ " unlocked for this sweep" %}
+            {% if checked %}
+            {#- K2: what the check found, said as three facts that tick on in turn (sweep-a.css; at once with reduced motion). The
+               credit is the newest account's own figure, as Apify answered it. The key itself is not here: it never comes back. #}
+            <ol class="key-run is-done" aria-label="What the check found">
+              <li class="on">{{ tick() }}Reached Apify</li>
+              <li class="on">{{ tick() }}Credit on this account: ${{ '%.2f'|format(checked.credit_usd) }}</li>
+              <li class="on">{{ tick() }}{{ unlocked }}</li>
+            </ol>
+            <div class="actions">
+              <a class="primary big" href="{{ url_for('configure') }}">Continue to your plan<span class="go"
+                 aria-hidden="true">&rarr;</span></a>
+            </div>
+            {% else %}
+            {# A flex column, because p and label both carry margin: 0 in this
+               system — without it the note and the submit button below it sat on
+               the same pixels. The token is a password field with no value: this
+               page never writes it back, and the server never echoes it. The lock
+               beside it is decoration; the sentence under it is the promise. #}
+            <form class="stack-tight" method="post" action="{{ url_for('key') }}"{% if public_mode %} data-sound-next="key"{% endif %}
+                  x-data="{ sent: false }" @submit="sent = true">
+              {% if key_err %}<p class="error" role="alert">{{ error }}</p>{% endif %}
+              <label><span class="label">Your Apify API token</span>
+                <span class="key-slot"><input type="password" name="token" autocomplete="off" required
+                       aria-describedby="key-privacy"><svg class="key-lock" width="20" height="20" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="3" y="7" width="10" height="7" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5.5 7 V5 a2.5 2.5 0 0 1 5 0 V7" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></span>
+              </label>
+              <p class="meta" id="key-privacy"><b>Your Apify key is used for this Sweep only and is never saved:</b> not
+                to a file, a cookie or a log. Checking it costs nothing; Sweep only reads the balance.</p>
+              {% if apify_guide['3-token'] %}
+                <figure class="shot">
+                  <img src="{{ url_for('static', filename=apify_guide['3-token']) }}"
+                       loading="lazy" decoding="async" width="1200"
+                       alt="The Apify console under Settings, API and
+                            Integrations, showing the Personal API tokens
+                            section with a copy button beside the token.">
+                </figure>
+              {% endif %}
+              <div class="actions">
+                <button class="primary" type="submit"
+                        :disabled="sent">Check my key</button>
+                <button type="button" class="tertiary js-only"
+                        @click="step = 2; $nextTick(() => $refs.step2.focus())">&larr; Back a step</button>
+              </div>
+              {#- While the check is out: the first fact is under way, the other two wait. Only the first is claimed, because
+                 it is the only one this page can know is happening; the next page says what the check found. Hidden until
+                 then, with or without a script (there is nothing to say before a submit). #}
+              <ol class="key-run" hidden :hidden="!sent" aria-live="polite">
+                <li class="now">{{ tick() }}<span class="sending">Checking your key with Apify…</span></li>
+                <li>{{ tick() }}Your credit</li>
+                <li>{{ tick() }}{{ unlocked }}</li>
+              </ol>
+            </form>
+            {% endif %}
+          </li>
+        </ol>
+
+        {# "About a minute, start to finish" is true of the guide, so it shows on steps 1 and 2 and goes at the paste step, where
+           it would be stale. Without a script it shows once, as ever (sweep-a.css hides it only under `.js`, from the class
+           the server starts with and Alpine then keeps). #}
+        <div class="wtip{% if s0 < 3 %} on{% endif %}" :class="{ on: step < 3 }">{{ tip("key-setup", "About a minute, start to finish.") }}</div>
+      </section>
+      <div class="cov-side" aria-hidden="true">
+        {{ orbit('setup', false, checked) }}
+        <span class="sticker cit">{{ 'Unlocked for this sweep' if checked else 'Unlocks with your Apify key' }}</span>
+      </div>
+      </div>
+    </div>
+
+  {% else %}
+    {# ---- The operator's console, unchanged --------------------------------
+       Two equal cards is the right shape here: the operator has a key in
+       .env already and is choosing between two things they can both do. #}
+    <div class="stack-tight">
+      <h1>How far should this sweep go?</h1>
+      <p class="lede">Sweep searches company boards and public job feeds for
+        nothing. The paid boards — {{ paid|join(', ') }} — bill per search
+        against your own Apify credit.</p>
+    </div>
+
+    {% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+    <div class="grid2 choices">
+      <form class="panel" method="post" action="{{ url_for('key_free') }}">
+        <div class="panel-head">
+          <h2>Free sources only</h2>
+          <span class="chip free">$0.00</span>
+        </div>
+        <p>Company ATS boards and public remote feeds, ranked against your
+          résumé the same way. No key, no credit, nothing to approve.</p>
+        <p class="meta">The paid boards stay switched off. You can come back to
+          this step and connect a key later — nothing you have done so far is
+          lost.</p>
+        <button class="primary" type="submit">Search the free sources</button>
+      </form>
+
+      <form class="panel" method="post" action="{{ url_for('key') }}">
+        <div class="panel-head">
+          <h2>Free sources and the paid boards</h2>
+          <span class="chip">needs a key</span>
+        </div>
+        <p>Everything above, plus {{ paid|join(', ') }}. Sweep prices the
+          search before it runs and spends nothing until you approve the plan.</p>
+        <label><span class="label">Apify API token</span>
+          <input type="password" name="token" autocomplete="off" required
+                 aria-describedby="env-note">
+        </label>
+        <p class="meta" id="env-note">Written to the .env file in this folder, on your own
+          machine. Sweep runs locally and has no server to send it to. Find it at
+          console.apify.com under Settings, then Integrations.</p>
+        <p class="meta">Verifying reads your credit balance, which is free.</p>
+        <button class="primary" type="submit">Verify key</button>
+      </form>
+    </div>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,165 @@
+/* Results rows: candidate rules for the Results phase (D3 prototype).
+
+   Loaded after sweep.css by prototype/results.html ONLY. The app does not
+   reference this file, and nothing here is in sweep.css until the Results phase
+   has been approved. It uses the real tokens and the real type rules, so what
+   the prototype shows is what those rules do to dense, real-shaped content.
+
+   What it tries, against docs/design/SWEEP_VISUAL_AUDIT.md section 4.1:
+     - the suggestion is a line of its own at 13px in the text colour, with the
+       résumé's name in 600 (it was an 11px grey line);
+     - the caution comes first, as the engine orders it, quieter, with a "!";
+     - the figure is right-aligned, tabular, 22px (28px on a phone);
+     - a column nobody fills is not drawn, and on a phone an absent value is
+       not drawn either, so two unlabelled "Not stated" cannot sit side by side;
+     - a phone card puts the recommendation and the facts on the full width
+       instead of beside the score, and every fact carries its word. */
+
+.proto-note {
+  padding: var(--s3) var(--s4); border: 1px dashed var(--control);
+  border-radius: var(--radius); color: var(--warm); font-size: 12px; line-height: 16px;
+  max-width: none;
+}
+.proto-section { margin-top: var(--s7); }
+.proto-section > .muted { margin-top: var(--s3); }
+.proto-section > .jobs-wrap { margin-top: var(--s5); }
+
+/* ---- Views and the one line above the rows -------------------------------- */
+
+.results-head { display: flex; flex-direction: column; gap: var(--s4); }
+.views {
+  display: flex; flex-wrap: wrap; gap: 0 var(--s6);
+  border-bottom: 1px solid var(--rule);
+}
+.views a {
+  display: inline-block; padding: var(--s3) 0; margin-bottom: -1px;
+  font-weight: 500; color: var(--warm); text-decoration: none;
+  border-bottom: 2px solid transparent;
+}
+.views a:hover { color: var(--chalk); }
+.views a[aria-current="page"] { color: var(--chalk); font-weight: 600; border-bottom-color: var(--chalk); }
+.views .n { margin-left: var(--s2); font-weight: 500; color: var(--slate); }
+.how-scoring { margin-top: calc(var(--s3) * -1); }
+.bar {
+  display: flex; flex-wrap: wrap; align-items: baseline;
+  justify-content: space-between; gap: var(--s2) var(--s6);
+}
+.bar-actions { display: flex; gap: var(--s6); }
+
+/* ---- The rows ------------------------------------------------------------- */
+
+.jobs-wrap { min-width: 0; }
+.jobs { width: 100%; border-collapse: collapse; }
+.jobs th { padding: 0 var(--s5) var(--s3) 0; }
+.jobs th.m { text-align: right; padding-right: var(--s6); }
+.jobs td {
+  padding: var(--s4) var(--s5) var(--s4) 0; vertical-align: top;
+  font-size: 13px; line-height: 18px; color: var(--warm);
+  border-top: 1px solid var(--rule);
+}
+.jobs tbody tr:last-child td { border-bottom: 1px solid var(--rule); }
+.jobs td.m {
+  width: 4.5rem; padding-right: var(--s6); text-align: right;
+  font: 600 22px/26px var(--display); letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums; color: var(--chalk);
+}
+
+/* The job: title and company on one line, the recommendation under it. */
+.jobs td.job { min-width: 24rem; }
+.job-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--s3); max-width: none; }
+.job-line .title { font-size: 14px; line-height: 20px; font-weight: 600; color: var(--chalk); }
+.job-line .co { color: var(--warm); }
+/* A state the row is in, said in a word (the console's Applied and Opened). */
+.job-line .seen { font-size: 12px; line-height: 16px; color: var(--warm); }
+
+.suggest {
+  margin-top: var(--s2); padding-left: var(--s3); max-width: 62ch;
+  border-left: 2px solid var(--control);
+  font-size: 13px; line-height: 18px; color: var(--chalk);
+  overflow-wrap: break-word;
+}
+.rname { font-weight: 600; }
+.rname2 { font-weight: 500; }
+.caution {
+  display: flex; align-items: flex-start; gap: var(--s3);
+  margin-top: var(--s2); max-width: 62ch;
+  font-size: 12px; line-height: 16px; color: var(--warm);
+}
+.caution b { font-weight: 600; }
+.bang {
+  flex: none; display: grid; place-items: center; width: 14px; height: 14px; margin-top: 1px;
+  border: 1.5px solid var(--warm); border-radius: 50%; font: 700 10px/1 var(--text);
+}
+
+.jobs td.loc { width: 11rem; }
+.jobs td.pay { width: 9rem; white-space: nowrap; }
+.jobs td.exp { width: 6.5rem; white-space: nowrap; }
+.jobs td.none { color: var(--slate); }
+.jobs td.src { width: 6.5rem; white-space: nowrap; }
+.jobs .paid-word { display: block; font-size: 12px; line-height: 16px; color: var(--slate); }
+.jobs td.skills { width: 20rem; }
+.jobs td.skills .tag { margin: 0 var(--s2) var(--s2) 0; font-size: 12px; }
+.m-only { display: none; }
+.jobs td.act { width: 5.5rem; padding-right: 0; text-align: right; white-space: nowrap; }
+.jobs td.act .apply { display: inline-block; padding-block: 4px; margin-block: -4px; font-weight: 600; }
+.jobs .posted { display: block; margin-top: 2px; font-size: 12px; color: var(--slate); }
+
+/* Applied and opened: the same ink as every other row, stepped down one notch
+   for the title only, and the word above says why. */
+.jobs tr.applied .title, .jobs tr.opened .title { color: var(--warm); }
+
+/* ---- A phone ---------------------------------------------------------------
+   A card per job from the same DOM. Line 1: the figure and the job. Then, at
+   the full width rather than squeezed beside the figure: the caution, the
+   suggestion, the facts (each with its word, absent ones not drawn), the first
+   three skills, and Apply as a 44px target. */
+@media (max-width: 47.99rem) {
+  .jobs, .jobs tbody { display: block; }
+  .jobs thead { display: none; }
+  .jobs tr {
+    display: flex; flex-wrap: wrap; align-items: baseline;
+    padding: var(--s5); margin-bottom: var(--s4);
+    background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius);
+  }
+  /* The desktop rule that closes the last row (tbody tr:last-child td) outranks
+     anything written for a cell here, so its border is undone by name and
+     display is left out: listing display here once pinned the last card's
+     job cell at 24rem and let an absent value through. */
+  .jobs td { display: block; padding: 0; border: 0; }
+  .jobs tbody tr:last-child td { border-bottom: 0; }
+  .jobs td.m {
+    flex: 0 0 auto; width: auto; padding: 0; margin-right: var(--s4); text-align: left;
+    font-size: 28px; line-height: 32px;
+  }
+  /* The cell steps aside so the title can sit beside the figure and the
+     recommendation can take the whole row under it. */
+  .jobs td.job { display: contents; min-width: 0; }
+  .job-line { flex: 1 1 0; min-width: 0; }
+  /* The facts start a line of their own. (The pseudo-element of a
+     display:contents cell is a flex item of the card, so this is the break.) */
+  .jobs td.job::after { content: ""; flex: 0 0 100%; height: 0; }
+  .caution, .suggest { flex: 0 0 100%; max-width: none; margin-top: var(--s3); }
+  .caution + .suggest { margin-top: var(--s2); }
+  .jobs td.loc, .jobs td.pay, .jobs td.exp, .jobs td.src {
+    flex: 0 1 auto; width: auto; margin: var(--s3) var(--s5) 0 0;
+  }
+  .jobs td.pay, .jobs td.exp, .jobs td.src { white-space: nowrap; }
+  .jobs td.none { display: none; }
+  /* A word, not a separator: a "·" wrapped to the start of a line and stood alone. */
+  .jobs td.pay::before { content: "Pay\00a0"; color: var(--slate); }
+  .jobs td.src::before { content: "via\00a0"; color: var(--slate); }
+  .jobs .paid-word { display: inline; }
+  .jobs .paid-word::before { content: "\00a0·\00a0"; }
+  .d-only { display: none; }
+  .m-only { display: inline; }
+  .jobs td.skills { flex: 0 0 100%; width: auto; margin-top: var(--s4); }
+  .jobs td.act {
+    flex: 0 0 100%; width: auto; display: flex; align-items: center; justify-content: space-between;
+    margin-top: var(--s4); padding-top: var(--s2); border-top: 1px solid var(--rule); text-align: left;
+  }
+  .jobs td.act .apply {
+    display: inline-flex; align-items: center; min-height: 44px; min-width: 44px;
+    padding-block: 0; margin-block: 0; padding-right: var(--s5);
+  }
+  .jobs .posted { display: inline; margin: 0; }
+}

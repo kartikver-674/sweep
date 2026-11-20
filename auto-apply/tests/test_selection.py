@@ -1,0 +1,124 @@
+import os
+import tempfile
+import unittest
+
+import selection
+
+HEADER = ("score,matched_skills,is_fullstack,title,company,location,remote?,"
+          "experience_required,salary,hr_email,hr_phone,source_site,apply_url,date_posted\n")
+
+
+def _row(score, title, company, email, url):
+    return (f'{score},"node, react",True,{title},{company},India,False,'
+            f'1-3 Yrs,,{email},,naukri,{url},2026-07-20\n')
+
+
+class TestSelection(unittest.TestCase):
+    def _csv(self, rows):
+        fd, path = tempfile.mkstemp(suffix=".csv")
+        os.close(fd)
+        with open(path, "w", encoding="utf-8-sig") as f:
+            f.write(HEADER)
+            for r in rows:
+                f.write(r)
+        self.addCleanup(os.remove, path)
+        return path
+
+    def test_load_jobs_reads_columns(self):
+        path = self._csv([_row(28, "Full Stack Developer", "Jinrai", "career@jinraitech.com", "u1")])
+        jobs = selection.load_jobs(path)
+        self.assertEqual(jobs[0]["company"], "Jinrai")
+        self.assertEqual(jobs[0]["hr_email"], "career@jinraitech.com")
+
+    def test_select_filters_threshold_and_email_and_dedupe(self):
+        rows = [
+            _row(28, "Full Stack Developer", "Jinrai", "career@jinraitech.com", "u_jinrai"),
+            _row(7, "Fullstack Python Developer", "Elastiq", "careers@elastiq.ai", "u_elastiq"),
+            _row(-5, "IT Recruiter", "Orcapod", "hr@example.com", "u_orca"),
+            _row(40, "Full Stack Engineer", "NoEmailCo", "", "u_noemail"),
+        ]
+        path = self._csv(rows)
+        jobs = selection.load_jobs(path)
+        picked = selection.select_candidates(jobs, min_score=10, applied_keys=set(), limit=None)
+        keys = [selection.job_key(j) for j in picked]
+        self.assertEqual(keys, ["u_jinrai"])  # only Jinrai clears score>=10 AND has email
+
+    def test_dedupe_against_applied(self):
+        rows = [_row(28, "Full Stack Developer", "Jinrai", "career@jinraitech.com", "u_jinrai")]
+        path = self._csv(rows)
+        jobs = selection.load_jobs(path)
+        picked = selection.select_candidates(jobs, 10, {"u_jinrai"}, None)
+        self.assertEqual(picked, [])
+
+    def test_limit_applied(self):
+        rows = [_row(50, "Full Stack A", "A", "a@x.com", "ua"),
+                _row(40, "Full Stack B", "B", "b@x.com", "ub")]
+        path = self._csv(rows)
+        jobs = selection.load_jobs(path)
+        picked = selection.select_candidates(jobs, 10, set(), limit=1)
+        self.assertEqual([selection.job_key(j) for j in picked], ["ua"])
+
+    def test_load_applied_keys(self):
+        fd, path = tempfile.mkstemp(suffix=".csv")
+        os.close(fd)
+        with open(path, "w", encoding="utf-8", newline="") as f:
+            f.write("job_key,company,title,channel,status,timestamp\n")
+            f.write("u_jinrai,Jinrai,Full Stack Developer,email,drafted,2026-07-21T10:00:00\n")
+        self.addCleanup(os.remove, path)
+        self.assertEqual(selection.load_applied_keys(path), {"u_jinrai"})
+
+    def test_load_applied_keys_missing_file(self):
+        self.assertEqual(selection.load_applied_keys("/no/such.csv"), set())
+
+    def test_select_linkedin_filters_source_score_and_applied(self):
+        rows = [
+            {"score": "30", "source_site": "linkedin", "apply_url": "u_li1", "title": "FS", "company": "A"},
+            {"score": "5",  "source_site": "linkedin", "apply_url": "u_li2", "title": "FS", "company": "B"},
+            {"score": "40", "source_site": "naukri",   "apply_url": "u_nk1", "title": "FS", "company": "C"},
+            {"score": "22", "source_site": "LinkedIn", "apply_url": "u_li3", "title": "FS", "company": "D"},
+            {"score": "25", "source_site": "linkedin", "apply_url": "u_done", "title": "FS", "company": "E"},
+        ]
+        picked = selection.select_linkedin_candidates(
+            rows, min_score=10, applied_keys={"u_done"}, limit=None)
+        urls = [r["apply_url"] for r in picked]
+        self.assertEqual(urls, ["u_li1", "u_li3"])  # li2 below score, nk1 wrong source, done already applied
+
+    def test_select_all_candidates_any_source(self):
+        rows = [
+            {"score": "30", "source_site": "linkedin", "apply_url": "a"},
+            {"score": "20", "source_site": "naukri", "apply_url": "b"},
+            {"score": "5", "source_site": "indeed", "apply_url": "c"},   # below score
+            {"score": "40", "source_site": "indeed", "apply_url": ""},   # no apply_url
+            {"score": "25", "source_site": "naukri", "apply_url": "d"},  # already applied
+        ]
+        picked = selection.select_all_candidates(rows, 10, {"d"}, limit=None)
+        self.assertEqual([r["apply_url"] for r in picked], ["a", "b"])
+
+    def test_select_linkedin_respects_limit(self):
+        rows = [
+            {"score": "30", "source_site": "linkedin", "apply_url": "a"},
+            {"score": "20", "source_site": "linkedin", "apply_url": "b"},
+        ]
+        picked = selection.select_linkedin_candidates(rows, 10, set(), limit=1)
+        self.assertEqual([r["apply_url"] for r in picked], ["a"])
+
+    def test_non_numeric_score_treated_as_zero(self):
+        """Test that non-numeric scores are safely degraded to 0 without crashing."""
+        rows = [
+            _row("", "Full Stack Developer", "EmptyScoreCo", "empty@example.com", "u_empty"),
+            _row("N/A", "Full Stack Engineer", "NACo", "na@example.com", "u_na"),
+        ]
+        path = self._csv(rows)
+        jobs = selection.load_jobs(path)
+
+        # With min_score=10, both should be filtered out (score 0 < 10)
+        picked = selection.select_candidates(jobs, min_score=10, applied_keys=set(), limit=None)
+        self.assertEqual(picked, [])
+
+        # With min_score=0, both should be included (score 0 >= 0)
+        picked = selection.select_candidates(jobs, min_score=0, applied_keys=set(), limit=None)
+        self.assertEqual(len(picked), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()

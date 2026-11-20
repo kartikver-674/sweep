@@ -1,0 +1,721 @@
+{
+ "status": "MEASURED offline: each mutation applied to its source file (G, R1-R4: several edits), the named suites run, the file restored byte-identical (sha256 checked). The 28 V2-D mutations were rerun on the closeout tree.",
+ "baseline": "green (sweep.tests.test_search_v2_d 51 tests, C4.5 86, C2, C4, C0, B4, worker)",
+ "caught": 28,
+ "total": 28,
+ "not_applicable": {
+  "Q": "native ids collide across providers \u2014 no production code consumes native ids (D6: diagnostic-only)",
+  "R": "missing native id breaks fallback \u2014 same"
+ },
+ "first_run_survivors_fixed": {
+  "D1-A2": "added PublicMultiKey.test_11_the_estimate_fitting_is_not_the_plan_fitting",
+  "D1-B2": "added Coverage.test_3_fragmented_credit_is_not_coverage",
+  "D1-F": "added test_14_a_later_search_never_leapfrogs_one_that_cannot_run",
+  "D1-G": "the mutant now reorders the allocator's input as well as the authorization"
+ },
+ "mutations": [
+  {
+   "mutation": "D1-A",
+   "what": "Full authorization uses the estimate, not the ceilings (engine)",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_11_ceilings_not_expected_spend_authorise_it",
+    "test_12_the_partial_estimate_is_of_the_selected_searches",
+    "test_13_14_order_is_kept_and_nothing_leapfrogs",
+    "test_14_a_later_search_never_leapfrogs_one_that_cannot_run",
+    "test_15_16_left_out_is_neither_failed_nor_done",
+    "test_17_a_rerun_with_more_credit_runs_only_what_was_left",
+    "test_18_the_fresh_reading_decides_a_full_sweep",
+    "test_19_the_fresh_reading_sets_a_partial_sweeps_prefix",
+    "test_20_an_unreadable_account_is_not_counted",
+    "test_2_8_a_5_dollar_account_never_starts_the_10_548_plan",
+    "test_3_7_15_partial_runs_exactly_the_safe_prefix",
+    "test_3_fragmented_capacity_is_not_the_full_plan"
+   ],
+   "failing_count": 25,
+   "suites": [
+    "sweep.tests.test_search_v2_d",
+    "sweep.tests.test_paid_multi_account"
+   ],
+   "suite_s": 25.3
+  },
+  {
+   "mutation": "D1-A2",
+   "what": "Public Confirm authorizes on the estimate against credit",
+   "file": "sweep/app.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_11_the_estimate_fitting_is_not_the_plan_fitting",
+    "test_single_mode_places_on_the_one_best_account_never_the_sum"
+   ],
+   "failing_count": 2,
+   "suites": [
+    "sweep.tests.test_search_v2_d"
+   ],
+   "suite_s": 15.2
+  },
+  {
+   "mutation": "D1-B",
+   "what": "Aggregate balance instead of exact placement (engine)",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_11_ceilings_not_expected_spend_authorise_it",
+    "test_12_the_partial_estimate_is_of_the_selected_searches",
+    "test_13_14_order_is_kept_and_nothing_leapfrogs",
+    "test_14_a_later_search_never_leapfrogs_one_that_cannot_run",
+    "test_15_16_left_out_is_neither_failed_nor_done",
+    "test_18_the_fresh_reading_decides_a_full_sweep",
+    "test_19_the_fresh_reading_sets_a_partial_sweeps_prefix",
+    "test_21_nothing_readable_fails_closed_even_when_partial",
+    "test_2_8_a_5_dollar_account_never_starts_the_10_548_plan",
+    "test_3_7_15_partial_runs_exactly_the_safe_prefix",
+    "test_3_fragmented_capacity_is_not_the_full_plan",
+    "test_6_multi_account_off_uses_one_account_and_never_the_sum"
+   ],
+   "failing_count": 21,
+   "suites": [
+    "sweep.tests.test_search_v2_d",
+    "sweep.tests.test_paid_multi_account"
+   ],
+   "suite_s": 27.0
+  },
+  {
+   "mutation": "D1-B2",
+   "what": "Aggregate balance instead of exact placement (public coverage)",
+   "file": "sweep/plan.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_3_fragmented_credit_is_not_coverage"
+   ],
+   "failing_count": 1,
+   "suites": [
+    "sweep.tests.test_search_v2_d"
+   ],
+   "suite_s": 15.6
+  },
+  {
+   "mutation": "D1-C",
+   "what": "Duplicate account counted twice (engine discovery)",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_6_two_slots_on_one_account_are_one_account"
+   ],
+   "failing_count": 1,
+   "suites": [
+    "sweep.tests.test_search_v2_d",
+    "sweep.tests.test_paid_multi_account"
+   ],
+   "suite_s": 26.7
+  },
+  {
+   "mutation": "D1-C2",
+   "what": "Duplicate account counted twice (public add-key)",
+   "file": "sweep/app.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_22_a_second_key_to_the_same_account_is_refused_safely"
+   ],
+   "failing_count": 1,
+   "suites": [
+    "sweep.tests.test_search_v2_d"
+   ],
+   "suite_s": 14.6
+  },
+  {
+   "mutation": "D1-D",
+   "what": "Full sweep silently truncates with partial unchecked",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_11_ceilings_not_expected_spend_authorise_it",
+    "test_18_the_fresh_reading_decides_a_full_sweep",
+    "test_2_8_a_5_dollar_account_never_starts_the_10_548_plan",
+    "test_6_multi_account_off_uses_one_account_and_never_the_sum",
+    "test_7_16_every_rollback_keeps_the_accounts_authorization",
+    "test_7_insufficient_and_partial_not_chosen_starts_nothing",
+    "test_the_budget_still_holds_a_full_sweep_whole",
+    "test_the_sweep_budget_still_binds_however_much_the_pool_holds"
+   ],
+   "failing_count": 8,
+   "suites": [
+    "sweep.tests.test_search_v2_d",
+    "sweep.tests.test_paid_multi_account"
+   ],
+   "suite_s": 27.2
+  },
+  {
+   "mutation": "D1-E",
+   "what": "Partial checkbox ignored (engine never reads the setting)",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_13_14_order_is_kept_and_nothing_leapfrogs",
+    "test_14_a_later_search_never_leapfrogs_one_that_cannot_run",
+    "test_15_16_left_out_is_neither_failed_nor_done",
+    "test_17_a_rerun_with_more_credit_runs_only_what_was_left",
+    "test_19_the_fresh_reading_sets_a_partial_sweeps_prefix",
+    "test_20_an_unreadable_account_is_not_counted",
+    "test_3_7_15_partial_runs_exactly_the_safe_prefix",
+    "test_4_two_keys_to_one_account_are_one_account",
+    "test_6_multi_account_off_uses_one_account_and_never_the_sum",
+    "test_7_16_every_rollback_keeps_the_accounts_authorization",
+    "test_7_the_sweep_budget_is_untouched",
+    "test_8_insufficient_and_partial_chosen_runs_the_prefix"
+   ],
+   "failing_count": 18,
+   "suites": [
+    "sweep.tests.test_search_v2_d",
+    "sweep.tests.test_paid_multi_account"
+   ],
+   "suite_s": 25.3
+  },
+  {
+   "mutation": "D1-E2",
+   "what": "Partial checkbox ignored (Render never writes it)",
+   "file": "sweep/app.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_8_the_ticked_box_is_the_profiles_partial_setting",
+    "test_single_mode_places_on_the_one_best_account_never_the_sum"
+   ],
+   "failing_count": 2,
+   "suites": [
+    "sweep.tests.test_search_v2_d"
+   ],
+   "suite_s": 14.6
+  },
+  {
+   "mutation": "D1-F",
+   "what": "Partial runs every search that fits, not the prefix",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_14_a_later_search_never_leapfrogs_one_that_cannot_run"
+   ],
+   "failing_count": 1,
+   "suites": [
+    "sweep.tests.test_search_v2_d",
+    "sweep.tests.test_paid_multi_account"
+   ],
+   "suite_s": 26.0
+  },
+  {
+   "mutation": "D1-G",
+   "what": "LinkedIn prioritised by C5 contribution (allocator and authorization)",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_13_14_order_is_kept_and_nothing_leapfrogs"
+   ],
+   "failing_count": 1,
+   "suites": [
+    "sweep.tests.test_search_v2_d",
+    "sweep.tests.test_paid_multi_account"
+   ],
+   "suite_s": 26.3
+  },
+  {
+   "mutation": "D1-H",
+   "what": "A skipped-for-capacity search is written to .done_combos",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_15_16_left_out_is_neither_failed_nor_done",
+    "test_17_a_rerun_with_more_credit_runs_only_what_was_left",
+    "test_3_7_15_partial_runs_exactly_the_safe_prefix"
+   ],
+   "failing_count": 3,
+   "suites": [
+    "sweep.tests.test_search_v2_d",
+    "sweep.tests.test_paid_multi_account"
+   ],
+   "suite_s": 26.1
+  },
+  {
+   "mutation": "D1-I",
+   "what": "A skipped-for-capacity search is labelled failed",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_14_a_later_search_never_leapfrogs_one_that_cannot_run",
+    "test_15_16_left_out_is_neither_failed_nor_done",
+    "test_3_7_15_partial_runs_exactly_the_safe_prefix",
+    "test_7_insufficient_and_partial_not_chosen_starts_nothing",
+    "test_7_the_sweep_budget_is_untouched",
+    "test_a_provider_resource_refusal_is_account_resource",
+    "test_an_account_that_can_never_fit_the_run_stops_the_phase",
+    "test_committed_is_never_released_whatever_a_run_cost",
+    "test_the_sweep_budget_still_binds_however_much_the_pool_holds",
+    "test_unplaced_searches_stop_at_the_first_one_as_the_cap_does"
+   ],
+   "failing_count": 10,
+   "suites": [
+    "sweep.tests.test_search_v2_d",
+    "sweep.tests.test_paid_multi_account"
+   ],
+   "suite_s": 26.0
+  },
+  {
+   "mutation": "D1-J",
+   "what": "Configure-time headroom trusted (no fresh account read)",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_11_ceilings_not_expected_spend_authorise_it",
+    "test_12_the_partial_estimate_is_of_the_selected_searches",
+    "test_13_14_order_is_kept_and_nothing_leapfrogs",
+    "test_13_14_real_readings_stay_the_providers_the_clamp_is_labelled",
+    "test_14_a_later_search_never_leapfrogs_one_that_cannot_run",
+    "test_15_16_left_out_is_neither_failed_nor_done",
+    "test_18_the_fresh_reading_decides_a_full_sweep",
+    "test_19_the_fresh_reading_sets_a_partial_sweeps_prefix",
+    "test_20_an_unreadable_account_is_not_counted",
+    "test_23_no_key_reaches_telemetry_the_log_or_an_output",
+    "test_2_3_the_clamp_only_ever_lowers",
+    "test_2_no_single_account_but_the_pool_places_it"
+   ],
+   "failing_count": 45,
+   "suites": [
+    "sweep.tests.test_search_v2_d",
+    "sweep.tests.test_paid_multi_account"
+   ],
+   "suite_s": 22.2
+  },
+  {
+   "mutation": "D1-K",
+   "what": "A visitor's raw key becomes its slot label",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_23_no_key_reaches_telemetry_the_log_or_an_output",
+    "test_24_the_same_placement_as_the_developer_source"
+   ],
+   "failing_count": 2,
+   "suites": [
+    "sweep.tests.test_search_v2_d"
+   ],
+   "suite_s": 14.5
+  },
+  {
+   "mutation": "D1-L",
+   "what": "Developer clamp applies to a visitor's accounts (engine)",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_27_the_developer_clamp_never_touches_a_visitors_accounts"
+   ],
+   "failing_count": 1,
+   "suites": [
+    "sweep.tests.test_search_v2_d"
+   ],
+   "suite_s": 14.5
+  },
+  {
+   "mutation": "D1-L2",
+   "what": "Developer clamp reaches a public child (worker)",
+   "file": "deploy/sweep_worker.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_27_the_developer_clamp_is_stripped_from_the_child"
+   ],
+   "failing_count": 1,
+   "suites": [
+    "sweep.tests.test_search_v2_d"
+   ],
+   "suite_s": 14.6
+  },
+  {
+   "mutation": "D1-M",
+   "what": "Per-account exposure ignored",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_5_6_two_searches_two_accounts_and_never_the_small_one",
+    "test_an_account_credit_refusal_stops_and_retries_nothing",
+    "test_an_ambiguous_start_keeps_both_ceilings_and_is_never_retried",
+    "test_per_account_committed_never_exceeds_its_capacity",
+    "test_pre_network_local_failure_releases_everything"
+   ],
+   "failing_count": 5,
+   "suites": [
+    "sweep.tests.test_search_v2_d",
+    "sweep.tests.test_paid_multi_account"
+   ],
+   "suite_s": 26.0
+  },
+  {
+   "mutation": "D1-N",
+   "what": "Global max_spend_usd ignored by authorization",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_the_budget_still_holds_a_full_sweep_whole",
+    "test_the_sweep_budget_still_binds_however_much_the_pool_holds"
+   ],
+   "failing_count": 2,
+   "suites": [
+    "sweep.tests.test_search_v2_d",
+    "sweep.tests.test_paid_multi_account"
+   ],
+   "suite_s": 26.3
+  },
+  {
+   "mutation": "D1-O",
+   "what": "Unreadable account treated as unlimited",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_20_an_unreadable_account_is_not_counted",
+    "test_21_nothing_readable_fails_closed_even_when_partial",
+    "test_an_account_that_cannot_be_identified_is_left_out",
+    "test_no_token_value_reaches_any_artifact"
+   ],
+   "failing_count": 4,
+   "suites": [
+    "sweep.tests.test_search_v2_d",
+    "sweep.tests.test_paid_multi_account"
+   ],
+   "suite_s": 26.3
+  },
+  {
+   "mutation": "D-L",
+   "what": "Adaptive defaults to shadow",
+   "file": "paid_adaptive.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_a_sweep_without_the_variable_writes_no_section",
+    "test_off_unless_asked",
+    "test_only_shadow_and_enforce_write_the_section"
+   ],
+   "failing_count": 3,
+   "suites": [
+    "sweep.tests.test_paid_adaptive"
+   ],
+   "suite_s": 11.3
+  },
+  {
+   "mutation": "D-M",
+   "what": "Paid workers default above 2",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_workers_default_two_clamped_one_to_four"
+   ],
+   "failing_count": 1,
+   "suites": [
+    "sweep.tests.test_paid_concurrency",
+    "sweep.tests.test_paid_multi_account"
+   ],
+   "suite_s": 40.9
+  },
+  {
+   "mutation": "D-N",
+   "what": "LinkedIn depth reduced below 15",
+   "file": "config.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_a_pricing_change_moves_the_cap",
+    "test_an_older_engine_plan_keeps_the_estimate_cap",
+    "test_an_unbounded_provider_stays_an_estimate_beside_the_ceilings",
+    "test_below_the_plans_exposure_the_engine_runs_what_fits",
+    "test_confirm_and_run_carry_the_ceiling_holding_cap",
+    "test_indeed_only",
+    "test_linkedin_only",
+    "test_live_positions_not_push_order",
+    "test_the_default_plan_is_authorised_in_full",
+    "test_the_public_global_plan",
+    "test_the_public_india_plan",
+    "test_the_public_remote_plan_keeps_the_floor"
+   ],
+   "failing_count": 14,
+   "suites": [
+    "sweep.tests.test_paid_plan_audit",
+    "sweep.tests.test_plan",
+    "sweep.tests.test_paid_adaptive"
+   ],
+   "suite_s": 11.2
+  },
+  {
+   "mutation": "D-P",
+   "what": "The dead Postman board is back in the registry",
+   "file": "config.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_counts",
+    "test_greenhouse_boards_neither_added_removed_nor_reordered"
+   ],
+   "failing_count": 2,
+   "suites": [
+    "sweep.tests.test_free_concurrency_greenhouse"
+   ],
+   "suite_s": 13.2
+  },
+  {
+   "mutation": "D-S",
+   "what": "A research script gains unguarded paid reachability",
+   "file": "bench/search_v2_d5_d6_analysis.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_every_file_that_can_reach_paid_code_is_classified"
+   ],
+   "failing_count": 1,
+   "suites": [
+    "sweep.tests.test_paid_dev_guard"
+   ],
+   "suite_s": 3.9
+  },
+  {
+   "mutation": "D-O",
+   "what": "The faster poll applies to LinkedIn too",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_each_provider_polls_at_its_own_interval"
+   ],
+   "failing_count": 1,
+   "suites": [
+    "sweep.tests.test_search_v2_d"
+   ],
+   "suite_s": 14.4
+  },
+  {
+   "mutation": "D-O2",
+   "what": "One aggressive interval for every provider",
+   "file": "scraper.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_each_provider_polls_at_its_own_interval"
+   ],
+   "failing_count": 1,
+   "suites": [
+    "sweep.tests.test_search_v2_d"
+   ],
+   "suite_s": 14.6
+  },
+  {
+   "mutation": "D-T",
+   "what": "A second public key leaks into the worker's log",
+   "file": "deploy/sweep_worker.py",
+   "verdict": "caught",
+   "failing_tests": [
+    "test_a_held_key_is_written_nowhere_and_logged_nowhere"
+   ],
+   "failing_count": 1,
+   "suites": [
+    "deploy.test_sweep_worker",
+    "sweep.tests.test_search_v2_d"
+   ],
+   "suite_s": 15.1
+  }
+ ],
+ "closeout": {
+  "what": "V2-D closeout: no configuration spends a visitor's keys without the AccountPool's authorization",
+  "caught": 11,
+  "total": 11,
+  "mutations": [
+   {
+    "mutation": "R1",
+    "what": "Public one-key bypasses the AccountPool",
+    "file": "scraper.py",
+    "verdict": "caught",
+    "failing_tests": [
+     "test_10_the_single_account_engine_never_takes_a_visitors_key",
+     "test_1_one_public_key_is_a_pool_of_one_account_under_every_flag",
+     "test_2_8_a_5_dollar_account_never_starts_the_10_548_plan",
+     "test_3_7_15_partial_runs_exactly_the_safe_prefix",
+     "test_7_16_every_rollback_keeps_the_accounts_authorization"
+    ],
+    "failing_count": 5,
+    "suites": [
+     "sweep.tests.test_search_v2_d",
+     "sweep.tests.test_paid_multi_account"
+    ],
+    "suite_s": 26.1
+   },
+   {
+    "mutation": "R2",
+    "what": "SWEEP_PAID_MULTI_ACCOUNT=0 restores the legacy public engine",
+    "file": "scraper.py",
+    "verdict": "caught",
+    "failing_tests": [
+     "test_10_the_single_account_engine_never_takes_a_visitors_key",
+     "test_1_one_public_key_is_a_pool_of_one_account_under_every_flag",
+     "test_2_8_a_5_dollar_account_never_starts_the_10_548_plan",
+     "test_3_7_15_partial_runs_exactly_the_safe_prefix",
+     "test_6_multi_account_off_uses_one_account_and_never_the_sum",
+     "test_7_16_every_rollback_keeps_the_accounts_authorization"
+    ],
+    "failing_count": 6,
+    "suites": [
+     "sweep.tests.test_search_v2_d",
+     "sweep.tests.test_paid_multi_account"
+    ],
+    "suite_s": 25.3
+   },
+   {
+    "mutation": "R3",
+    "what": "Concurrency off restores the legacy public engine",
+    "file": "scraper.py",
+    "verdict": "caught",
+    "failing_tests": [
+     "test_10_the_single_account_engine_never_takes_a_visitors_key",
+     "test_1_one_public_key_is_a_pool_of_one_account_under_every_flag",
+     "test_2_8_a_5_dollar_account_never_starts_the_10_548_plan",
+     "test_3_7_15_partial_runs_exactly_the_safe_prefix",
+     "test_7_16_every_rollback_keeps_the_accounts_authorization"
+    ],
+    "failing_count": 5,
+    "suites": [
+     "sweep.tests.test_search_v2_d",
+     "sweep.tests.test_paid_multi_account"
+    ],
+    "suite_s": 25.3
+   },
+   {
+    "mutation": "R4",
+    "what": "An unavailable pool falls back permissively",
+    "file": "scraper.py",
+    "verdict": "caught",
+    "failing_tests": [
+     "test_10_the_single_account_engine_never_takes_a_visitors_key",
+     "test_8_an_unavailable_pool_fails_closed_with_no_fallback"
+    ],
+    "failing_count": 2,
+    "suites": [
+     "sweep.tests.test_search_v2_d",
+     "sweep.tests.test_paid_multi_account"
+    ],
+    "suite_s": 26.1
+   },
+   {
+    "mutation": "R5",
+    "what": "Render reads a dry run with no safe mode as safe",
+    "file": "sweep/app.py",
+    "verdict": "caught",
+    "failing_tests": [
+     "test_9_no_safe_mode_at_the_worker_means_no_paid_start"
+    ],
+    "failing_count": 1,
+    "suites": [
+     "sweep.tests.test_search_v2_d"
+    ],
+    "suite_s": 14.7
+   },
+   {
+    "mutation": "R5b",
+    "what": "The engine's dry run ignores the kill switch",
+    "file": "scraper.py",
+    "verdict": "caught",
+    "failing_tests": [
+     "test_the_dry_run_names_a_safe_mode_or_off_and_nothing_else"
+    ],
+    "failing_count": 1,
+    "suites": [
+     "sweep.tests.test_search_v2_d"
+    ],
+    "suite_s": 14.6
+   },
+   {
+    "mutation": "R6",
+    "what": "One-account pool mode skips capacity authorization",
+    "file": "scraper.py",
+    "verdict": "caught",
+    "failing_tests": [
+     "test_11_ceilings_not_expected_spend_authorise_it",
+     "test_12_the_partial_estimate_is_of_the_selected_searches",
+     "test_15_16_left_out_is_neither_failed_nor_done",
+     "test_18_the_fresh_reading_decides_a_full_sweep",
+     "test_19_the_fresh_reading_sets_a_partial_sweeps_prefix",
+     "test_2_8_a_5_dollar_account_never_starts_the_10_548_plan",
+     "test_3_7_15_partial_runs_exactly_the_safe_prefix",
+     "test_6_multi_account_off_uses_one_account_and_never_the_sum",
+     "test_7_16_every_rollback_keeps_the_accounts_authorization",
+     "test_7_insufficient_and_partial_not_chosen_starts_nothing",
+     "test_8_insufficient_and_partial_chosen_runs_the_prefix",
+     "test_9_10_the_exact_boundary_and_a_mill_below_it"
+    ],
+    "failing_count": 17,
+    "suites": [
+     "sweep.tests.test_search_v2_d",
+     "sweep.tests.test_paid_multi_account"
+    ],
+    "suite_s": 27.1
+   },
+   {
+    "mutation": "R7",
+    "what": "Partial under a one-account rollback runs beyond the safe prefix",
+    "file": "scraper.py",
+    "verdict": "caught",
+    "failing_tests": [
+     "test_15_16_left_out_is_neither_failed_nor_done",
+     "test_3_7_15_partial_runs_exactly_the_safe_prefix",
+     "test_8_insufficient_and_partial_chosen_runs_the_prefix",
+     "test_a_provider_resource_refusal_is_account_resource",
+     "test_unplaced_searches_stop_at_the_first_one_as_the_cap_does"
+    ],
+    "failing_count": 5,
+    "suites": [
+     "sweep.tests.test_search_v2_d",
+     "sweep.tests.test_paid_multi_account"
+    ],
+    "suite_s": 26.1
+   },
+   {
+    "mutation": "R8",
+    "what": "A one-key $5 account is authorised for the full $10.548 plan",
+    "file": "scraper.py",
+    "verdict": "caught",
+    "failing_tests": [
+     "test_11_ceilings_not_expected_spend_authorise_it",
+     "test_18_the_fresh_reading_decides_a_full_sweep",
+     "test_2_8_a_5_dollar_account_never_starts_the_10_548_plan",
+     "test_6_multi_account_off_uses_one_account_and_never_the_sum",
+     "test_7_16_every_rollback_keeps_the_accounts_authorization",
+     "test_7_insufficient_and_partial_not_chosen_starts_nothing",
+     "test_8_insufficient_and_partial_chosen_runs_the_prefix",
+     "test_an_account_that_can_never_fit_the_run_stops_the_phase",
+     "test_the_authorization_record_is_beside_the_outputs",
+     "test_the_budget_still_holds_a_full_sweep_whole"
+    ],
+    "failing_count": 10,
+    "suites": [
+     "sweep.tests.test_search_v2_d",
+     "sweep.tests.test_paid_multi_account"
+    ],
+    "suite_s": 26.9
+   },
+   {
+    "mutation": "R9",
+    "what": "The worker ignores the public-paid kill switch",
+    "file": "deploy/sweep_worker.py",
+    "verdict": "caught",
+    "failing_tests": [
+     "test_10_no_paid_child_while_public_paid_is_off"
+    ],
+    "failing_count": 1,
+    "suites": [
+     "sweep.tests.test_search_v2_d",
+     "deploy.test_sweep_worker"
+    ],
+    "suite_s": 15.1
+   },
+   {
+    "mutation": "R10",
+    "what": "Single mode combines the visitor's accounts on Confirm",
+    "file": "sweep/app.py",
+    "verdict": "caught",
+    "failing_tests": [
+     "test_single_mode_places_on_the_one_best_account_never_the_sum"
+    ],
+    "failing_count": 1,
+    "suites": [
+     "sweep.tests.test_search_v2_d"
+    ],
+    "suite_s": 14.6
+   }
+  ]
+ }
+}

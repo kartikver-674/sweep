@@ -1,0 +1,97 @@
+{% extends "base.html" %}
+{# Public mode only, outside the door: what Sweep keeps and for how long. Every sentence here is a claim about the code —
+   change the code (SESSION_TTL, the worker's TTL_SECONDS and HOLD_SECONDS, saved(), the inference access log) and this
+   page has to change with it. No step is current. #}
+{% block title %}How Sweep handles your data — Sweep{% endblock %}
+{% block body %}
+<div class="stack data-a">
+  <div class="stack-tight hero">
+    <span class="eyebrow">Your data</span>
+    <h1>What Sweep keeps, and for <span class="scrib">how long</span>.</h1>
+    <p class="lede">As little as it can, for as short a time as it can. There's no account, no ads and no tracking
+      script. Here is what happens to each thing you give it.</p>
+  </div>
+
+  <section class="stack-tight" aria-labelledby="d-resume">
+    <h2 id="d-resume">Your résumé</h2>
+    <ul>
+      <li>The PDF is read and deleted in the same request. It is never saved.</li>
+      <li>The text read from it stays in the app's memory, tied to your browser's session. It's dropped two hours
+        after your last activity, or sooner if the app restarts.</li>
+      <li>To work out your skills and roles, the text goes to Sweep's own language model, which runs on Modal. It
+        answers and keeps nothing. Its log records the size of the request, not the words.</li>
+      <li>The file and its full text never go to the search server, to Apify or to any job site.</li>
+    </ul>
+  </section>
+
+  <section class="stack-tight" aria-labelledby="d-key">
+    <h2 id="d-key">Your Apify key (Deep Sweep only)</h2>
+    <ul>
+      <li>Sweep checks the key with Apify to read your remaining credit, then hands it to the search server. That
+        server holds it in memory until your sweep starts, for 45 minutes at most, and passes it straight to the
+        sweep.</li>
+      <li>The key is never written to disk, a log, a web address or a page. Sweep keeps only a one-way fingerprint
+        of the account, to tell two accounts apart, and the credit figure it shows you.</li>
+      <li>Deep Sweep runs on your Apify account, so Apify sees those searches and bills them to your credit.</li>
+    </ul>
+  </section>
+
+  <section class="stack-tight" aria-labelledby="d-search">
+    <h2 id="d-search">Your search and its results</h2>
+    <ul>
+      <li>When you start a sweep, the search server receives what Sweep worked out from your résumé (roles,
+        skills and their weights, a short summary of your experience) and the preferences you confirmed. Never
+        the file or its full text.</li>
+      <li>The search and its results stay on that server for 48 hours, so you can come back to them, and are then
+        deleted.</li>
+      <li>Searches reach career pages and job boards as ordinary searches: job titles, skills and places, never
+        your name or contact details.</li>
+    </ul>
+  </section>
+
+  <section class="stack-tight" aria-labelledby="d-who">
+    <h2 id="d-who">Who else is involved</h2>
+    <ul>
+      <li><strong>Render</strong> hosts this site. Its logs record each request: your IP address, the page address
+        and your browser type. Sweep's own activity lines swap your IP and session for codes that can't be turned
+        back into them. Render keeps logs for a limited time.</li>
+      <li><strong>Modal</strong> runs the language model that reads your résumé text.</li>
+      <li><strong>Oracle Cloud</strong> hosts the search server.</li>
+      <li><strong>Apify</strong> runs Deep Sweep's searches, only if you connect your own key.</li>
+      <li><strong>Google Fonts</strong> serves this site's typefaces, so Google sees your IP address when a page
+        loads.</li>
+      <li><strong>Resend</strong> delivers the feedback form to my inbox, with your email address so I can reply.
+        Sweep keeps no copy.</li>
+    </ul>
+  </section>
+
+  <section class="stack-tight" aria-labelledby="d-cookies">
+    <h2 id="d-cookies">Cookies</h2>
+    <p>One signed session cookie, which ties your browser to your session for two hours after your last activity.
+      Your browser also remembers whether you picked light or dark mode; that setting never leaves your device.</p>
+  </section>
+
+  <section class="stack-tight" aria-labelledby="d-ranking">
+    <h2 id="d-ranking">How the ranking works</h2>
+    <ul>
+      <li>Sweep reads your résumé for skills and experience, and you can turn each skill up or down before
+        searching.</li>
+      <li>Quick Sweep searches company career pages and public job boards. Deep Sweep adds LinkedIn, Indeed and
+        Naukri through your Apify account.</li>
+      <li>Each job gets a match score: how much of your résumé, skills and experience, the job actually asks for,
+        weighted by your settings. A higher score means more of what you have.</li>
+      <li>Scores compare jobs for one résumé, not one résumé against another. A high score isn't a promise of an
+        interview: it measures overlap, not what a hiring team will decide.</li>
+    </ul>
+  </section>
+
+  <section class="stack-tight" aria-labelledby="d-ask">
+    <h2 id="d-ask">Questions</h2>
+    <p>Use the Feedback button at the top of any page. I read every message.</p>
+  </section>
+
+  <div class="actions">
+    <a class="primary" href="{{ url_for('upload') }}">Start with your résumé</a>
+  </div>
+</div>
+{% endblock %}

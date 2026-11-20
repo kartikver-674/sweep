@@ -1,0 +1,10 @@
+/* The résumé deck's page change (V2): loaded only by the unified review with a résumé open (review.html), so only a
+   change from one deck page to another fades, and every other page change in Sweep is the plain one it was.
+
+   "Looks right, next résumé" saves (a form post), and the next résumé is a new page. Without this the browser blanks
+   the page and paints the new one: the shuffle (going.css) ended, then the whole screen flashed. With it, the browser
+   holds the shuffled page and fades the next one in over it (a view transition across documents; both pages opt in
+   here). A browser without them (Firefox, for now) changes page as it always did. Reduced motion: no fade. */
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition { navigation: auto; }
+}

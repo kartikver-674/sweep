@@ -1,0 +1,2702 @@
+/* Sweep — the v3 Stitch design system, ported to plain CSS, read as a quiet
+   ledger (docs/design/SWEEP_DESIGN_DIRECTION.md). What the colours mean:
+     amber  money, and the brand mark — nothing else
+     teal   free, done, ok
+     coral  an error, a limit crossed, something destructive
+     chalk  everything else: focus, selection, progress, "you are here"
+   Boxes are for a boundary that means something (the résumé being edited, a
+   dialog, a cost total); everything else is a hairline and space.
+
+   Adopting v3's own Tailwind play CDN was the other route and is rejected on
+   purpose: /key renders this shell too, and that is where the user pastes the
+   one credential this tool exists to protect — base.html already vendors
+   Alpine rather than let a third-party script read that DOM. A stylesheet
+   also cannot leave every screen unstyled when a CDN is unreachable, which on
+   the money screens would read as the page being broken rather than offline. */
+
+:root {
+  /* Dark only. Without this the native parts of a control that the page does
+     not draw itself (select menus, scrollbars, the checkbox box, autofill)
+     come up in the light scheme on a dark page. */
+  color-scheme: dark;
+  /* Palette, tokens taken from the v3 screens. The old names are kept because
+     running.html paints its tiles from var(--paid)/--free/--well/--rule. */
+  --ground: #03161c;      /* page */
+  --well: #001017;        /* recessed: meter track, inputs, empty tiles */
+  --surface: #0f2228;     /* panel */
+  --surface-low: #0b1e24; /* panel nested inside a panel */
+  --surface-high: #1a2c33;
+  --surface-edge: #25373e;
+  --chalk: #d2e6ee;       /* body text */
+  --chalk-lift: #eef7fb;  /* the primary button on hover; was a hard-coded #fff */
+  --warm: #d7c3af;        /* secondary text, warm against the teal ground */
+  --slate: #9f8e7b;       /* labels, de-emphasised */
+  --dim: #524435;         /* hints, the quietest readable step */
+  --paid: #f0a22e;        /* money */
+  --paid-lift: #ffc376;   /* money, on a dark fill */
+  --free: #7ed6cd;        /* costs nothing */
+  --free-lift: #9af2e9;
+  --over: #ffb4ab;        /* past the cap */
+  --rule: rgba(37, 55, 62, 0.9);
+  /* The edge of a control (field, select, radio card, stepper). --rule is a
+     hairline for dividers and is 1.3:1 on the panel, which leaves a field
+     findable only by its label. WCAG 1.4.11 asks 3:1 for the boundary that
+     identifies a control. #5d7078 clears it on --surface and --ground but
+     not on --surface-high (2.79) or --surface-edge (2.39), both of which sit
+     behind controls (the location menu, a hovered stepper); this is that
+     colour, lifted until it clears all six grounds (lowest: 3.03). */
+  --control: #6b818a;
+
+  --s1: 0.125rem; --s2: 0.25rem; --s3: 0.5rem;
+  --s4: 0.75rem;  --s5: 1rem;    --s6: 1.5rem; --s7: 2rem;
+  --radius: 0.25rem;
+  --header-h: 3.5rem;
+
+  --display: "Bricolage Grotesque", Geist, system-ui, sans-serif;
+  --text: Geist, system-ui, -apple-system, sans-serif;
+}
+
+* { box-sizing: border-box; }
+/* The header is sticky (and on Configure so is the meter), so a control that
+   takes keyboard focus near the top of the viewport would sit under it. This
+   is how far the browser scrolls it clear: the tallest case, a phone's two-row
+   header. */
+html { scroll-padding-top: 8rem; }
+/* No double-tap-to-zoom delay on anything that is pressed. */
+a, button, summary, label, input, select { touch-action: manipulation; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--chalk);
+  font: 400 14px/1.55 var(--text);
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---- Type ---------------------------------------------------------------- */
+
+/* Bricolage for the page title, a section and a figure; Geist for everything
+   you read or fill in, which is why h3 is no longer in the display face.
+   Twelve is the floor: nothing a person has to read is set smaller. */
+h1, h2, .numeral { font-family: var(--display); }
+h1 { font-size: 22px; line-height: 1.25; letter-spacing: -0.02em; font-weight: 600; margin: 0; text-wrap: balance; }
+h2 { font-size: 17px; line-height: 1.4; letter-spacing: -0.01em; font-weight: 600; margin: 0; text-wrap: balance; }
+h3 { font: 600 14px/20px var(--text); margin: var(--s5) 0 0; }
+p  { margin: 0; max-width: 68ch; text-wrap: pretty; }
+.muted { color: var(--slate); }
+.free  { color: var(--free); }
+.paid  { color: var(--paid); }
+.over  { color: var(--over); }
+strong, b { font-weight: 600; }
+/* A link is chalk and underlined, never teal: teal means free, and a source
+   name that read as a link sat next to an Apply that was the real one. */
+a { color: var(--chalk); text-decoration: underline; text-underline-offset: 3px; }
+
+/* The name of a field or of what follows it, in words. It was a 10px uppercase
+   slate micro-label carrying group names a person has to read; it is now 12px
+   in the warm secondary colour (9.6:1), sentence case. Column heads keep the
+   small caps, at 12px, because a ruled column is what they name. */
+.label {
+  display: block;
+  font-size: 12px; line-height: 16px; font-weight: 500;
+  color: var(--warm);
+}
+/* Same specificity as .free/.paid and later in the file, so a label that is
+   also colour-coded has to name both classes to keep its colour. */
+.label.free { color: var(--free); }
+.label.paid { color: var(--paid); }
+.meta { font-size: 12px; line-height: 16px; font-weight: 500; color: var(--slate); }
+.lede { font-size: 15px; line-height: 22px; color: var(--warm); max-width: 62ch; }
+
+.numeral {
+  display: block;
+  font-size: 44px; line-height: 1; font-weight: 800; letter-spacing: -0.04em;
+  color: var(--paid); margin: 0;
+}
+.numeral.over { color: var(--over); }
+/* The header's figure when it is exactly nothing (D7C): a free sweep's estimate, a sweep that has spent nothing yet. Amber
+   is money, and nothing is not money. The moment there is some, `.zero` is gone and it is amber again. */
+.meter.zero .numeral { color: var(--chalk); }
+/* "not known" is not a figure, so it is not typeset as one. */
+.numeral.unknown { font-size: 16px; font-weight: 500; letter-spacing: 0; color: var(--slate); }
+
+/* ---- Shell -------------------------------------------------------------- */
+
+header {
+  position: sticky; top: 0; z-index: 30;
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3) var(--s6);
+  padding: var(--s3) var(--s5);
+  background: var(--well);
+  border-bottom: 1px solid var(--rule);
+}
+.brand { display: flex; align-items: center; gap: var(--s3); flex-wrap: wrap; }
+
+.chip {
+  display: inline-flex; align-items: center; gap: var(--s2);
+  padding: var(--s1) var(--s2);
+  font-size: 12px; line-height: 16px; font-weight: 500;
+  color: var(--free); background: var(--surface-low);
+  border: 1px solid rgba(126, 214, 205, 0.3); border-radius: var(--radius);
+}
+.chip.quiet { color: var(--slate); border-color: var(--dim); }
+/* The free path: teal is this palette's "costs nothing", and no dot — the
+   dot on .chip.on means a live key. */
+.chip.free { color: var(--free); border-color: var(--free); }
+.chip.on::before {
+  content: ""; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--free); flex: none;
+}
+
+/* ---- The step tracker --------------------------------------------------- */
+
+.tracker { margin-right: auto; min-width: 0; display: flex; align-items: center; }
+.tracker ol {
+  display: flex; align-items: center; gap: var(--s2);
+  margin: 0; padding: 0; list-style: none; min-width: 0;
+  overflow-x: auto; scrollbar-width: none;
+}
+.tracker ol::-webkit-scrollbar { display: none; }
+
+.step { display: flex; align-items: center; flex: none; }
+/* The connector carries the sequence. On the first step there is nothing
+   behind it to connect to. */
+.step + .step::before {
+  content: ""; width: 14px; height: 1px; flex: none;
+  background: var(--rule); margin-right: var(--s2);
+}
+.step > a {
+  display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s2) var(--s2);
+  font-size: 12px; font-weight: 500; color: var(--slate);
+  text-decoration: none; white-space: nowrap; border-radius: var(--radius);
+}
+.step > a[href]:hover { color: var(--chalk); background: var(--surface-high); }
+
+/* The marker states. None of them borrows a colour: amber is money and teal is
+   free, so where you are, what is done and what is locked are told apart by
+   shape and weight — a heavier ring and a bold label for here, a filled disc
+   with a tick for done, a thin muted ring for locked. */
+.marker {
+  display: grid; place-items: center; flex: none;
+  width: 18px; height: 18px; border-radius: 50%;
+  font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums;
+  border: 1px solid var(--slate); color: var(--slate);
+}
+.step.done > a { color: var(--chalk); }
+.step.done .marker {
+  background: var(--chalk); border-color: var(--chalk); color: var(--ground);
+}
+.step.current > a { color: var(--chalk); font-weight: 700; }
+.step.current .marker {
+  background: transparent; border: 2px solid var(--chalk); color: var(--chalk);
+}
+.step.locked > a { color: var(--slate); cursor: default; }
+.step.locked .marker { border-color: var(--slate); color: var(--slate); }
+
+/* Narrow: only where you are and what comes next, plus the count. Seven
+   steps cannot fit, and a sideways-scrolling tracker hides the very thing
+   it exists to show. */
+.tracker-at {
+  font-size: 12px; font-weight: 600; color: var(--chalk);
+  white-space: nowrap; margin-right: var(--s3);
+}
+@media (max-width: 63.99rem) {
+  .step:not(.current):not(.next) { display: none; }
+  /* ...except the one you just came from. Where you are and what is next
+     is enough to say where you ARE, but it is not a way back, and on a
+     phone this tracker is the only one there is: every other route to the
+     profile is a link inside a panel on some other screen. "Your profile
+     is ready — review profile" used to cover the gap on Search, which is
+     also why it was still being shown to people who had just been there. */
+  .step:has(+ .step.current) { display: flex; }
+  .step.current + .step.next::before { width: 10px; }
+  .step.next .step-label { color: var(--slate); }
+}
+@media (min-width: 64rem) {
+  .tracker-at { display: none; }
+}
+.credit {
+  margin-left: auto; white-space: nowrap;
+  font-size: 12px; font-weight: 500; color: var(--warm);
+}
+
+/* ---- Feedback ----------------------------------------------------------- */
+/* Quiet on purpose: chrome, not a call to action. The focus ring is the only
+   accent it gets. The tracker's
+   margin-right:auto (or .credit's margin-left) already pushes it right. */
+.feedback-open {
+  display: inline-flex; align-items: center; gap: var(--s2); flex: none;
+  padding: var(--s2) var(--s3);
+  font: 500 12px/1 var(--text); color: var(--warm);
+  background: transparent; border: 1px solid var(--control); border-radius: var(--radius);
+  cursor: pointer;
+}
+.feedback-open:hover { color: var(--chalk); border-color: var(--slate); background: var(--surface-high); }
+/* A class that sets display beats the UA's [hidden] rule, so both of the
+   things this feature hides by attribute say it again. */
+.feedback-open[hidden], .feedback [hidden] { display: none; }
+/* The tracker needs the width on a phone; the icon keeps its name for
+   screen readers. */
+@media (max-width: 40rem) {
+  /* When it wraps onto a row of its own it stays on the right, where it is
+     on a wide screen; beside the credit figure, that figure's auto margin
+     already carries both. */
+  .feedback-open { padding: var(--s2) var(--s3); margin-left: auto; }
+  .credit ~ .feedback-open { margin-left: 0; }
+  .feedback-label {
+    position: absolute; width: 1px; height: 1px;
+    overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+  }
+}
+/* A phone. Most screens already give the tracker a row of its own, and in the
+   flow the button would wrap under it into a third row. So the brand row
+   becomes a row of its own too, and the button sits at its right end, out of
+   the flow — measured on /review at 390px: 117px of header either way,
+   instead of 169. Keyed on the button being shown, so the console, and a
+   browser without <dialog>, keep the header they had. */
+@media (max-width: 30rem) {
+  header:has(> .feedback-open:not([hidden])) .brand { flex-basis: 100%; }
+  .feedback-open { position: absolute; top: var(--s3); right: var(--s5); }
+}
+@media (pointer: coarse) { .feedback-open { min-height: 44px; min-width: 44px; justify-content: center; } }
+
+/* No padding on the dialog itself, so a click whose target IS the dialog
+   can only have landed on the backdrop — that is how it closes. */
+dialog.feedback {
+  width: min(34rem, calc(100vw - 2 * var(--s5)));
+  max-height: calc(100dvh - 2 * var(--s5));
+  padding: 0; overflow: auto;
+  color: var(--chalk); background: var(--surface);
+  border: 1px solid var(--rule); border-radius: var(--radius);
+}
+dialog.feedback::backdrop { background: rgba(0, 16, 23, 0.75); }
+.feedback form { display: flex; flex-direction: column; gap: var(--s4); padding: var(--s5); }
+.feedback .stack-tight { gap: var(--s4); }
+.feedback textarea { resize: vertical; min-height: 7rem; }
+.feedback-hp { position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden; }
+
+/* ---- The meter ---------------------------------------------------------- */
+/* One per screen, always this screen's own state. */
+
+.meter { background: var(--surface); border-bottom: 1px solid var(--rule); }
+.meter-head {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2) var(--s5);
+  padding: var(--s3) var(--s5);
+}
+.meter-head .label { flex: none; }
+.meter .numeral {
+  font-size: 30px; letter-spacing: -0.02em; font-weight: 700;
+  /* A counting figure re-lays-out on every frame without this. */
+  font-variant-numeric: tabular-nums;
+}
+.meter-facts { margin-left: auto; color: var(--slate); font-size: 12px; font-weight: 500; }
+.meter-facts b { color: var(--chalk); }
+
+.meter-track {
+  position: relative; height: 8px;
+  background: var(--well); border-top: 1px solid var(--rule);
+}
+.meter-fill { height: 100%; background: var(--paid); width: 0; }
+.meter.over .meter-fill { background: var(--over); }
+.meter-cap {
+  /* pulled back by its own width: at left: 100% it stood one pixel outside the track and
+     widened the page by a pixel on every screen that shows a cap */
+  position: absolute; top: -3px; margin-left: -1px; width: 1px; height: 14px;
+  background: var(--chalk);
+}
+
+main {
+  display: block;
+  max-width: 88rem; margin: 0 auto;
+  padding: var(--s6) var(--s5) var(--s7);
+}
+
+/* ---- Layout ------------------------------------------------------------- */
+
+.stack { display: flex; flex-direction: column; gap: var(--s6); }
+.stack-tight { display: flex; flex-direction: column; gap: var(--s3); }
+
+/* Content plus the cost sidebar. One column until there is room for two. */
+.split { display: grid; gap: var(--s6); align-items: start; }
+.split > * { min-width: 0; }
+
+.grid2 { display: grid; gap: var(--s4); }
+/* The row of figures above the search grid, and only there (running.html).
+   It used to cap each tile at 18rem and pack them left, so three tiles ended
+   short of the panel they sit above and the column read as ragged. auto-fit
+   collapses the tracks nothing occupies and a 1fr max lets the survivors take
+   the width back, so three tiles span the row and still drop to two, then
+   one, as it narrows. */
+.tiles {
+  display: grid; gap: var(--s4);
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+}
+
+/* The summary cards on the public review screen. Same auto-fit rule as
+   .tiles, at a wider floor: a card holds a sentence and a row of chips, and
+   at 12rem the chips wrapped one per line. */
+.cards {
+  display: grid; gap: var(--s4);
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+}
+.cards > .card { margin-bottom: 0; gap: var(--s3); }
+/* The one line of each card that is the answer. Display face, because this
+   is what the reader is checking — everything else on the card supports it. */
+.card-figure {
+  font-family: var(--display); font-size: 16px; line-height: 1.3;
+  font-weight: 600; color: var(--chalk);
+}
+/* Pinned to the foot of the card, so the three notes sit on one line across
+   the row however tall each card's own content is. A ragged row of notes
+   reads as three unrelated panels rather than one summary. */
+.card-note { margin-top: auto; }
+
+/* ---- Panels ------------------------------------------------------------- */
+
+.panel {
+  background: var(--surface); border: 1px solid var(--rule);
+  border-radius: var(--radius); padding: var(--s5);
+  display: flex; flex-direction: column; gap: var(--s4);
+  margin: 0 0 var(--s5);
+}
+.panel:last-child { margin-bottom: 0; }
+.stack > .panel, .split > .panel, .split > * > .panel,
+.grid2 > .panel { margin-bottom: 0; }
+.panel > p { color: var(--warm); }
+.panel > p.muted { color: var(--slate); }
+.panel-head {
+  display: flex; flex-wrap: wrap; align-items: baseline;
+  justify-content: space-between; gap: var(--s3);
+}
+.inset {
+  background: var(--surface-low); border: 1px solid var(--rule);
+  border-radius: var(--radius); padding: var(--s4);
+}
+.tile {
+  background: var(--surface); border: 1px solid var(--rule);
+  border-radius: var(--radius); padding: var(--s4);
+  display: flex; flex-direction: column; gap: var(--s2);
+}
+.tile .figure {
+  font-family: var(--display); font-size: 28px; line-height: 1;
+  font-weight: 700; letter-spacing: -0.02em;
+}
+.tile .figure small { font-size: 12px; font-weight: 500; color: var(--slate); letter-spacing: 0; }
+
+/* The one screen element that carries the design's weight: the running
+   estimate. Everything around it is deliberately quiet. */
+.headline-figure {
+  background: var(--well); border: 1px solid var(--dim);
+  border-radius: var(--radius); padding: var(--s5);
+  display: flex; flex-direction: column; gap: var(--s2);
+}
+.headline-figure .numeral { color: var(--paid-lift); }
+
+/* ---- Forms -------------------------------------------------------------- */
+
+label { display: block; font-size: 13px; color: var(--chalk); }
+form > label, .panel label { margin: 0; }
+
+/* Selected by exclusion, not by listing text/number/password: an attribute
+   selector matches the attribute, not the resolved type, so <input name="name">
+   with no type= fell through to the UA's light default — which is exactly what
+   the profile-name field on /review did. */
+input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="submit"]),
+select, textarea {
+  display: block; width: 100%; margin-top: var(--s2);
+  padding: var(--s4) var(--s4);
+  font: 500 13px/16px var(--text); font-variant-numeric: tabular-nums;
+  color: var(--chalk); background: var(--well);
+  border: 1px solid var(--control); border-radius: var(--radius);
+}
+/* --dim is 1.97:1 on --ground and 1.75:1 on --surface — below AA for any
+   text. It stays the token for HAIRLINES (dashed borders, empty tiles), which
+   are not text, and text that used it moves to --slate at 5.84:1. */
+input::placeholder { color: var(--slate); opacity: 1; }
+
+/* 16px on a touch device. Below that, iOS Safari zooms the whole page when a
+   field takes focus and does not zoom back out — which on /key meant pasting
+   an API token into a page you then had to pinch to read. Scoped to a coarse
+   pointer so the 13px density the rest of the system is built on survives
+   everywhere it is being read with a mouse. */
+@media (pointer: coarse) {
+  input:not([type="checkbox"]):not([type="radio"]):not([type="file"]):not([type="submit"]),
+  select, textarea { font-size: 16px; line-height: 20px; }
+}
+select {
+  appearance: none;
+  /* Chevron drawn in CSS: an icon font would be one more network dependency
+     on the screen where the estimate has to be readable offline. */
+  background-image: linear-gradient(45deg, transparent 50%, var(--slate) 50%),
+                    linear-gradient(135deg, var(--slate) 50%, transparent 50%);
+  background-position: right 1.1rem center, right 0.85rem center;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: var(--s7);
+}
+input[type="file"] {
+  width: 100%; padding: var(--s6) var(--s5);
+  font: 500 13px var(--text); color: var(--warm);
+  background: var(--surface-low); border: 1px dashed var(--control);
+  border-radius: var(--radius); cursor: pointer;
+}
+input[type="file"]:hover { background: var(--surface-high); border-color: var(--slate); }
+input[type="file"]::file-selector-button {
+  margin-right: var(--s5); padding: var(--s3) var(--s5);
+  font: 600 12px var(--text); color: var(--ground);
+  background: var(--chalk); border: 0; border-radius: var(--radius); cursor: pointer;
+}
+input[type="checkbox"], input[type="radio"] { accent-color: var(--chalk); }
+
+/* A radio or checkbox and its prose read as one choice, so they sit on one
+   row rather than the label wrapping under the control. */
+.choice {
+  display: flex; align-items: flex-start; gap: var(--s4);
+  padding: var(--s4);
+  background: var(--surface-low); border: 1px solid var(--control);
+  border-radius: var(--radius); cursor: pointer;
+}
+.choice:hover { background: var(--surface-high); }
+.choice > input { margin: 2px 0 0; flex: none; }
+.choice > span { display: block; }
+.choice .why { display: block; margin-top: var(--s2); color: var(--slate); font-size: 12px; }
+.choice:has(:checked) { background: var(--surface-high); box-shadow: inset 2px 0 0 var(--chalk); }
+.choice:has(:checked) > span > b { color: var(--chalk); }
+
+/* Three weights of action. One primary per view: the decision. A secondary is
+   an outline in the control colour. A tertiary is an underlined word, for the
+   way out, the way back and anything that manages rather than moves on. */
+button.primary, a.primary {
+  display: inline-block; align-self: flex-start;
+  padding: var(--s4) var(--s6);
+  font: 600 14px/1 var(--text); color: var(--ground);
+  background: var(--chalk); border: 0; border-radius: var(--radius);
+  cursor: pointer; text-decoration: none;
+  transition: background-color var(--ms-1) ease, transform var(--ms-1) ease;
+}
+button.primary:hover, a.primary:hover { background: var(--chalk-lift); }
+button.secondary, a.secondary {
+  display: inline-block; align-self: flex-start;
+  padding: var(--s4) var(--s5);
+  font: 500 14px/1 var(--text); color: var(--chalk);
+  background: transparent; border: 1px solid var(--control); border-radius: var(--radius);
+  cursor: pointer; text-decoration: none;
+  transition: background-color var(--ms-1) ease, transform var(--ms-1) ease;
+}
+button.secondary:hover, a.secondary:hover { background: var(--surface-high); }
+button.primary:active, a.primary:active,
+button.secondary:active, a.secondary:active { transform: translateY(1px); }
+button.tertiary, a.tertiary {
+  display: inline-block;
+  padding: var(--s2) 0;
+  font: 500 14px/1.2 var(--text); color: var(--warm);
+  background: none; border: 0; cursor: pointer;
+  text-decoration: underline; text-underline-offset: 3px;
+}
+button.tertiary:hover, a.tertiary:hover { color: var(--chalk); }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s5); }
+
+/* Submitted buttons are disabled by Alpine across the app; without this they
+   still read as clickable, which invites the second click the disable exists
+   to prevent. */
+button[disabled], button[disabled]:hover {
+  opacity: .5; cursor: default; background: var(--chalk);
+}
+button.secondary[disabled], button.secondary[disabled]:hover,
+button.tertiary[disabled], button.tertiary[disabled]:hover {
+  background: transparent;
+}
+
+.error {
+  border-left: 2px solid var(--over); padding: var(--s3) 0 var(--s3) var(--s4);
+  color: var(--over); background: rgba(255, 180, 171, 0.06);
+}
+
+/* ---- Tables ------------------------------------------------------------- */
+
+/* Two properties here are load-bearing, not tidiness, and both were measured:
+   min-width:0 because .panel is a flex column, so a child keeps min-width:auto
+   and grows to its content — which made the listings table widen the page body
+   instead of scrolling inside its own box. And contain:paint because even once
+   the box clips correctly, Chrome still propagates a min-width table's layout
+   overflow to the viewport: /results measured documentElement.scrollWidth 951
+   against a 390 viewport, so a phone could swipe 561px into empty space.
+   overflow:clip and max-width:100% both leave that at 951; contain:paint
+   returns it to 391. */
+.scroll-x {
+  overflow-x: auto; min-width: 0; contain: paint;
+  margin: 0 calc(var(--s5) * -1); padding: 0 var(--s5);
+}
+
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-weight: 600; }
+/* Column names are labels, not data: same small caps as everywhere else. */
+th[scope="col"] {
+  font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--slate); font-weight: 600;
+  padding: 0 var(--s4) var(--s3) 0; white-space: nowrap;
+}
+td {
+  padding: var(--s4) var(--s4) var(--s4) 0;
+  border-top: 1px solid var(--rule); vertical-align: top;
+}
+tr.free td, td.free { color: var(--free); }
+td.paid { color: var(--paid); }
+tbody tr:hover td, table tr:hover td { background: rgba(26, 44, 51, 0.5); }
+/* The whole row opens the listing; the hover shade above is already the
+   affordance, so this only has to say it is clickable. */
+tr.rowlink { cursor: pointer; }
+
+/* Applied. The row stays exactly where it was so the list does not reflow
+   under the click that ticked it, and it stays readable because "where did I
+   apply" is a question asked later. It used to be faded to .45 opacity, which
+   took body text to 3.65:1 and the grey company line to 2.1:1 — a state the
+   user made themselves, rendered unreadable. Now the title and score step
+   down from --chalk to --warm (9.6:1) and the row SAYS "Applied": a word,
+   because a colour step alone is not a state. */
+tr.applied .job-line > b, tr.applied td.score,
+tr.opened .job-line > b, tr.opened td.score { color: var(--warm); }
+.job-line .state, tr.opened .job-line > b::after {
+  display: inline-block; margin-left: var(--s3); vertical-align: baseline;
+  font: 500 12px/16px var(--text); color: var(--warm);
+}
+tr.opened .job-line > b::after { content: "Opened"; }
+.did { width: 1.75rem; }
+/* 24px, not the 16px of the box inside it: a fine pointer needs a target
+   that size too (WCAG 2.5.8), and the touch rule below still makes it 44. */
+.tick { display: inline-flex; align-items: center; justify-content: center;
+        min-width: 24px; min-height: 24px; cursor: pointer; }
+.tick input { width: 1rem; height: 1rem; margin: 0; cursor: pointer;
+              accent-color: var(--chalk); }
+
+/* Already opened, in this browser. These rows are still live listings, still
+   clickable, so they are not faded (it was .62, which took the company line
+   to 2.8:1): the title steps down to --warm as above and the row carries the
+   word "Opened" after its title. */
+/* A second channel that costs nothing and needs no JavaScript: the browser's
+   own record of the link. Colour only — :visited permits nothing else. */
+.listings a:visited { color: var(--slate); }
+tr.muted:hover td, tr.muted:hover th { background: none; }
+
+/* ---- Disclosure --------------------------------------------------------- */
+
+/* A summary is a panel head that happens to be clickable, so it is laid out
+   like one: marker, heading, and whatever belongs on the right. */
+details > summary {
+  cursor: pointer; list-style: none;
+  display: flex; align-items: baseline; gap: var(--s3);
+}
+details > summary > h2, details > summary > h3 { margin: 0 auto 0 0; }
+/* Without a heading inside it, the summary text is the heading. */
+details > summary { font-family: var(--display); font-size: 15px; font-weight: 600; }
+details > summary > h2, details > summary > h3, details > summary > .meta { font-weight: inherit; }
+details > summary > .meta { font-family: var(--text); font-weight: 500; }
+summary::-webkit-details-marker { display: none; }
+/* A drawn triangle, not a rotated "›". The glyph's own box is taller than
+   its ink and sits off-centre in it, so rotating it left a mark floating
+   above the text that read as a stray tick rather than a control. This box
+   is exactly 8x8, so it turns around its own middle. */
+summary::before {
+  content: ""; flex: none; align-self: baseline; margin-bottom: 3px;
+  width: 0; height: 0; border: 4px solid transparent;
+  border-left-color: var(--slate); border-right-width: 0;
+  transform-origin: 2px 50%;
+  transition: transform .15s ease;
+}
+details[open] > summary::before { transform: rotate(90deg); }
+details > summary:hover::before { border-left-color: var(--chalk); }
+details > *:not(summary) { margin-top: var(--s4); }
+/* A CLOSED <details> is still a flex container with two children: the
+   summary, and the ::details-content box the rest is slotted into. That box
+   is size-contained rather than display:none, so it is zero-tall but still
+   present — and .panel's row gap dutifully opens 12px underneath the summary
+   to separate it from nothing. Measured on all three public disclosures:
+   13px above the summary, 25px below it.
+
+   One rule rather than three, because Advanced search settings, Adjust what
+   Sweep looks for and the Apify disclosure are the same .panel flex column;
+   and on :not([open]) rather than on each, so the expanded state — where the
+   gap IS separating two things — keeps it. */
+details:not([open]) { row-gap: 0; }
+
+/* A disclosure that holds a whole section rather than a paragraph.
+   Deliberately FLATTER than the cards above it — recessed rather than raised,
+   and no heavier border — because a closed disclosure styled as a panel reads
+   as a fourth card of equal importance, which is the opposite of what putting
+   it behind a click was for. */
+.disclosure {
+  background: var(--surface-low); padding: var(--s4) var(--s5);
+}
+.disclosure > summary > h2 { margin-right: auto; font-size: 15px; }
+.disclosure > summary > .meta {
+  font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--slate);
+}
+.disclosure-body { margin-top: var(--s5); }
+/* The arrow on a primary action. Nudged with margin rather than a gap so it
+   travels with the last word instead of being a second column. */
+.primary .go { margin-left: var(--s3); }
+
+/* ---- The one obvious answer --------------------------------------------- */
+
+/* A panel that IS the recommendation, rather than one of two equal options.
+   The lift is a 1px accent edge, not a fill or a glow: the design system
+   spends colour on cost and state only, and this is neither. */
+.hero-choice { border-color: var(--free); }
+.hero-choice > .panel-head > h2 { font-size: 20px; }
+
+/* A list that reads as "what you get" rather than as prose. The marker is
+   drawn, not a bullet glyph, so it aligns on the text's first line. */
+.ticks { margin: 0; padding: 0; list-style: none;
+  display: flex; flex-direction: column; gap: var(--s3); }
+.ticks > li {
+  position: relative; padding-left: var(--s6); color: var(--warm);
+}
+.ticks > li::before {
+  content: ""; position: absolute; left: 2px; top: 0.35em;
+  width: 9px; height: 5px;
+  border-left: 1.5px solid var(--free); border-bottom: 1.5px solid var(--free);
+  transform: rotate(-45deg);
+}
+
+/* The dominant action on a screen whose whole job is one decision. Bigger
+   than .primary rather than a different colour — the system has one primary
+   fill, and two of them would be two primaries. */
+button.big, a.big {
+  padding: var(--s5) var(--s7); font-size: 15px; line-height: 1.1;
+}
+
+/* ---- Getting an Apify key ----------------------------------------------- */
+
+/* A guide nested inside the Apify disclosure: someone who already has a key
+   never opens it. Flatter than the panel around it for the same reason the
+   Advanced sections are — a closed disclosure that looks like a card reads
+   as another thing to deal with. */
+/* Its own breathing room at both ends: this sits between a field and a
+   submit button, and a disclosure that opens into either of them is a
+   section with no edges. */
+.howto { margin: var(--s3) 0; }
+.howto > summary > h3 { margin: 0; margin-right: auto; font-size: 13px; }
+.howto > summary > .meta { font-size: 11px; }
+
+.howto-steps {
+  margin: var(--s5) 0 0; padding: 0; list-style: none; counter-reset: step;
+  display: flex; flex-direction: column; gap: var(--s6);
+}
+.howto-steps > li {
+  position: relative; padding-left: var(--s7);
+  display: flex; flex-direction: column; gap: var(--s3);
+  align-items: flex-start;
+}
+/* Numbered by the counter so the figure sits on the first line of a wrapped
+   step rather than beside the bullet's own box. */
+.howto-steps > li::before {
+  counter-increment: step; content: counter(step);
+  position: absolute; left: 0; top: -1px;
+  display: grid; place-items: center; width: 20px; height: 20px;
+  border-radius: 50%; border: 1px solid var(--slate);
+  font-size: 10px; font-weight: 700; color: var(--slate);
+  font-variant-numeric: tabular-nums;
+}
+.howto-steps > li > b { color: var(--chalk); }
+
+/* The screenshots. Capped rather than full-bleed: they are confirmation
+   that you are in the right place, not the instruction — the steps and the
+   links are that — and a 1200px console screenshot dominating the screen
+   where somebody is deciding whether to trust us with an API key gets the
+   emphasis exactly backwards. */
+.shot { margin: var(--s2) 0 0; width: 100%; max-width: 30rem; }
+.shot img {
+  display: block; width: 100%; height: auto;
+  border: 1px solid var(--rule); border-radius: var(--radius);
+}
+
+/* ---- The sweep you own, wherever you are -------------------------------- */
+
+/* A strip under the header, not a banner in the page: it belongs to the
+   shell rather than to whatever screen is showing, and it has to be
+   noticeable without competing with that screen's own primary action. */
+/* align-items is BASELINE, not centre: the dot is a state light for the
+   headline, and centring it against a said-block that has wrapped to two
+   lines floats it into the gap between the headline and the detail under
+   it. Baseline sits it on the headline's own line at every width. */
+.runbar {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s3) var(--s5);
+  padding: var(--s3) var(--s5);
+  background: var(--surface-low);
+  border-bottom: 1px solid var(--rule);
+}
+/* flex-basis 0, not auto. Flex breaks lines on an item's HYPOTHETICAL size,
+   before any shrinking — so a said-block basis-sized to its own max-content
+   (a headline plus a sentence, ~330px) did not fit beside the dot on a
+   phone and was pushed to a second flex line, leaving the dot alone on the
+   first. From zero it always fits, then grows into whatever is left and
+   wraps its own text. */
+.runbar-said { display: flex; flex-wrap: wrap; align-items: baseline;
+  gap: var(--s2) var(--s3); min-width: 0; flex: 1 1 0; }
+.runbar-said > b { font-size: 13px; font-weight: 600; color: var(--chalk); }
+.runbar-detail { font-size: 12px; color: var(--slate); }
+/* The action is a box, not a word on that line: baseline would hang it off
+   the headline's baseline and push the strip taller than it needs to be. */
+.runbar-go { margin-left: auto; flex: none; align-self: center; }
+
+/* One dot, coloured by state, because the strip is read at a glance from
+   the corner of the eye. The palette's own meanings hold: teal is done, chalk
+   is under way (amber is money, so it is not borrowed for progress), and the
+   coral stays reserved for something that went wrong. */
+.runbar-dot {
+  flex: none; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--slate);
+  /* No text, so the baseline the flex line aligns it on is its own bottom
+     edge — which lands the dot across the headline's x-height. */
+  align-self: baseline;
+}
+.runbar.live .runbar-dot { background: var(--chalk); }
+.runbar.wait .runbar-dot { background: var(--slate); }
+.runbar.done .runbar-dot { background: var(--free); }
+.runbar.warn .runbar-dot { background: var(--over); }
+.runbar.done .runbar-said > b { color: var(--free); }
+.runbar.warn .runbar-said > b { color: var(--over); }
+
+/* The live one breathes, so "in progress" is legible without reading it.
+   Reduced-motion turns it into a plain dot rather than removing the signal. */
+.runbar.live .runbar-dot { animation: runpulse 2s ease-in-out infinite; }
+@keyframes runpulse { 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) {
+  .runbar.live .runbar-dot { animation: none; }
+}
+
+/* On a phone the action drops to its own full-width row rather than being
+   squeezed against the text it belongs to. */
+@media (max-width: 30rem) {
+  .runbar-go { margin-left: 0; width: 100%; text-align: center; }
+}
+
+/* ---- What Sweep is about to do ------------------------------------------ */
+
+/* A definition list read as label-over-answer, not as a table: the answers
+   are chip rows of wildly different widths, and two columns left the Sources
+   row starting three inches from its own label. */
+.summary { margin: 0; display: flex; flex-direction: column; gap: var(--s5); }
+.summary.compact { gap: var(--s4); }
+.summary > div { display: flex; flex-direction: column; gap: var(--s3); }
+.summary dt {
+  font-size: 12px; line-height: 16px; font-weight: 500; color: var(--warm);
+}
+.summary dd {
+  margin: 0; display: flex; flex-wrap: wrap; gap: var(--s2);
+  align-items: center;
+}
+/* The paid boards are the ones being paid for, so they carry the money
+   colour the rest of the app reserves for exactly that. */
+.summary .paid-tag { color: var(--paid-lift); border-color: var(--paid); }
+.summary .free-tag { color: var(--free); border-color: var(--free); }
+.summary .pending { color: var(--slate); }
+
+/* Replaces the asterisk footnote: the fact travels with the control instead
+   of living 2,400px below the first mark it explains. Amber because it is
+   money; 12px in words, not a 10px uppercase caption. */
+.affects {
+  font: 600 12px/16px var(--text); color: var(--paid); margin-left: var(--s3);
+  white-space: nowrap;
+}
+
+/* "What happens next", as three steps rather than a paragraph. Numbered by
+   the counter rather than by <ol>'s own marker so the figure can carry the
+   label face and sit on the first line of a wrapped item. Neutral: a step is
+   not money. */
+.next-steps {
+  margin: 0; padding: 0; list-style: none; counter-reset: nxt;
+  display: flex; flex-direction: column; gap: var(--s3);
+  color: var(--warm);
+}
+.next-steps > li { position: relative; padding-left: var(--s6); margin: 0; font-size: 13px; line-height: 19px; }
+.next-steps > li::before {
+  counter-increment: nxt; content: counter(nxt);
+  position: absolute; left: 0; top: 0;
+  font-size: 12px; font-weight: 600; line-height: 19px;
+  color: var(--slate); font-variant-numeric: tabular-nums;
+}
+
+ul, ol { margin: 0; padding-left: var(--s6); color: var(--warm); }
+li { margin-bottom: var(--s2); }
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+  background: var(--well); padding: 1px var(--s2); border-radius: var(--radius);
+}
+
+/* A header cell that exists for screen readers, not for the eye. */
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap;
+}
+
+/* The first stop in the tab order, so a keyboard user does not tab through
+   the brand, the seven-step tracker, the credit and the run strip on every
+   screen. Hidden until it has focus; above the sticky header (z-index 30)
+   when it does. Its target is an empty anchor placed just before <main>. */
+.skip-link {
+  position: absolute; z-index: 40; left: var(--s3); top: var(--s3);
+  padding: var(--s4) var(--s5);
+  font: 600 13px/1 var(--text); color: var(--ground);
+  background: var(--chalk); border-radius: var(--radius); text-decoration: none;
+}
+.skip-link:not(:focus) {
+  width: 1px; height: 1px; padding: 0; overflow: hidden;
+  clip: rect(0 0 0 0); white-space: nowrap;
+}
+
+/* The ring is chalk (12.7:1 on the panel): amber is money, and a focus ring
+   that borrowed it would tell a keyboard user every control costs something. */
+a:focus-visible, button:focus-visible, input:focus-visible,
+select:focus-visible, summary:focus-visible,
+.choice:focus-within, .drop:focus-within {
+  outline: 2px solid var(--chalk); outline-offset: 2px;
+}
+
+/* ---- Wider screens ------------------------------------------------------ */
+
+@media (min-width: 48rem) {
+  h1 { font-size: 26px; line-height: 1.15; letter-spacing: -0.02em; }
+  .numeral { font-size: 56px; }
+  .meter .numeral { font-size: 32px; }
+  .grid2 { grid-template-columns: 1fr 1fr; }
+  main { padding: var(--s7) var(--s6); }
+  .scroll-x { margin: 0; padding: 0; }
+}
+
+@media (min-width: 64rem) {
+  header { height: var(--header-h); flex-wrap: nowrap; padding: 0 var(--s5); }
+  .meter { position: sticky; top: var(--header-h); z-index: 20; }
+  /* Content, then the cost panel that has to stay in view while the form
+     above it changes the figure. */
+  .split { grid-template-columns: minmax(0, 1fr) 21rem; }
+  .split > .aside { position: sticky; top: calc(var(--header-h) + 3.75rem); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+  /* `*` does not match a pseudo-element, so every pulse drawn on a ::before
+     (a résumé's status, the passes list, "Saving…") kept moving. */
+  *::before, *::after { transition: none !important; animation: none !important; }
+}
+
+/* ---- Horizontal field rows ---------------------------------------------- */
+/* .panel stacks its children; a filter bar reads as one line instead. The
+   row direction is explicit: without it .panel's column direction survives,
+   which laid the whole filter bar out vertically down the right edge. */
+.row { display: flex; flex-flow: row wrap; align-items: flex-end; gap: var(--s4); }
+.row > label { flex: 1 1 11rem; min-width: 0; }
+.row > label:only-child { flex: 0 1 12rem; }
+.row > .actions { flex: none; }
+/* A stepper is a number, not a text field: it sizes to its own three
+   buttons rather than to the 11rem basis a form field gets, so a pair of
+   them sits together instead of spanning the panel with a gap between. */
+.row > label.narrow { flex: 0 0 auto; }
+
+/* Fixed-size tiles that reflow to the width available, rather than eight
+   columns stretched across whatever the panel happens to be. */
+/* auto-fill needs a constrained container to know how many columns fit, and
+   a flex column gives its children min-width:auto — so inside the <details>
+   the public screen now wraps this in, the grid sized to its content and
+   pushed the page to 485px at a 390px viewport. Contained here, the same way
+   .listings and .scroll-x are, rather than relying on an ancestor: this is a
+   wide glance and it may scroll sideways in its own box, but the page may
+   not. */
+.grid-groups { min-width: 0; overflow-x: auto; contain: paint; }
+details.panel { min-width: 0; }
+.search-grid {
+  display: grid; gap: 4px; justify-content: start;
+  grid-template-columns: repeat(auto-fill, minmax(2.6rem, 3rem));
+  max-width: 34rem;
+}
+/* Wide enough for the longest code config's verified names produce (UAE) at
+   this size, and no wider: the grid is a glance, not a table. */
+.cell {
+  height: 24px; border-radius: 2px;
+  border: 1px solid var(--rule); background: var(--well);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 600; letter-spacing: 0.02em;
+  color: var(--slate); overflow: hidden;
+}
+/* A filled cell is amber or teal, so its text has to be the dark ground —
+   chalk on either of them is unreadable. */
+.cell.done { background: var(--paid); border-color: var(--paid); color: var(--ground); }
+.cell.done.free { background: var(--free); border-color: var(--free); }
+/* The one in flight. A border that breathes, not a fill: a filled cell means
+   FINISHED everywhere else on this grid, and a second filled state would make
+   the grid say two things with one shape. The cell is 44px wide, so there is
+   no room for a "RUNNING…" label either — the legend carries the word. */
+.cell.running { border-color: var(--chalk); color: var(--chalk); }
+.key.running::before { background: transparent; border: 1px solid var(--chalk); }
+.grid-group + .grid-group { margin-top: var(--s4); }
+.grid-group .label { margin-bottom: var(--s2); }
+
+/* A costed line item: site, count, rate, subtotal. */
+.lines { width: 100%; }
+.lines td { padding: var(--s3) var(--s4) var(--s3) 0; border-top: 1px solid var(--rule); }
+.lines td:last-child { padding-right: 0; }
+
+/* Three short columns; at full width the checkbox and the weight end up at
+   opposite edges of the panel with the term adrift between them. */
+/* The bar takes the slack now, which is what the old 34rem cap was for:
+   without something elastic in the middle, the skill name and the two
+   controls drifted to opposite edges of a wide table. */
+.weights { width: 100%; }
+/* Centred, not the global top-align: the stepper is the tallest thing in
+   the row and everything beside it was floating at the row's top edge, an
+   inch above the control it describes. */
+.weights td { vertical-align: middle; padding-top: var(--s3); padding-bottom: var(--s3); }
+.weights .rank {
+  width: 2rem; color: var(--slate);
+  font: 500 12px/1 var(--text); font-variant-numeric: tabular-nums;
+}
+.weights .term { font-weight: 500; }
+/* The badge after a skill's name is a separate thing from the name, so it
+   gets a gap: they were set flush ("celery[Used at work]"). */
+.weights .term .tag { margin: 0 0 0 var(--s3); vertical-align: 1px; }
+.weights .level { width: auto; min-width: 4rem; }
+.weights td:nth-child(4), .weights th:nth-child(4) { width: 8rem; }
+.weights td:last-child, .weights th:last-child { width: 5rem; text-align: right; }
+
+/* How much this term is steering the sweep, at a glance and across the
+   whole list — the number alone answers that one row at a time. */
+.weights .bar {
+  display: block; height: 6px; max-width: 16rem; border-radius: var(--radius);
+  background: var(--well); overflow: hidden;
+}
+/* One neutral bar, in the warm secondary colour: amber is money and a weight is
+   not a price, and eight chalk bars would out-shout the Save under them. */
+.weights .bar > span {
+  display: block; height: 100%; width: 0; background: var(--warm);
+  border-radius: inherit;
+}
+/* Five steps, five rules. The alternative is a width interpolated into a
+   style attribute, which puts something in it that is not CSS. */
+.weights .bar .lv1 { width: 20%; }
+.weights .bar .lv2 { width: 40%; }
+.weights .bar .lv3 { width: 60%; }
+.weights .bar .lv4 { width: 80%; }
+.weights .bar .lv5 { width: 100%; }
+/* A term already ticked for removal is not steering anything. */
+.weights tr:has(input[name="drop"]:checked) .bar > span { background: var(--dim); }
+
+/* ---- The weight editor as cards, on a phone -----------------------------
+   Five columns do not fit in 250px of panel, and .scroll-x's answer — swipe
+   the table sideways — hides the controls it is scrolling. Same treatment
+   the shortlist already gets below 48rem: the <tr> becomes a grid and each
+   cell is placed by name, one DOM for both layouts.
+
+   Two stacked rows under the rank rather than five squeezed columns, so the
+   skill keeps the full width to wrap into and the stepper keeps its 44px
+   buttons. Nothing is scaled down to fit. */
+@media (max-width: 40rem) {
+  /* Not a scroll container any more: there is nothing wider than the panel
+     left inside it, and a box that can still scroll sideways by a pixel is
+     one a thumb can catch. */
+  .scroll-x { overflow-x: visible; contain: none; margin: 0; padding: 0; }
+  .weights, .weights tbody { display: block; }
+  /* The column names have nowhere to go on a card. Nothing is lost to a
+     screen reader: every control in the row already carries its own label
+     naming the term it belongs to. */
+  .weights tr.muted { display: none; }
+
+  .weights tr {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "rank term term"
+      "rank bar  bar"
+      "rank step drop";
+    gap: var(--s3) var(--s4);
+    align-items: center;
+    padding: var(--s4) 0;
+    border-top: 1px solid var(--rule);
+  }
+  /* The row after the hidden header, not :first-of-type — that still
+     matches the display:none header row and left the first card
+     carrying a rule with nothing above it. */
+  .weights tr.muted + tr { border-top: 0; padding-top: 0; }
+  .weights td { display: block; padding: 0; border: 0; }
+  /* A row is a card here: the cell rule and the hover band of a table would
+     draw a hairline over the stepper and a half-row highlight. */
+  .weights tr:hover td { background: none; }
+
+  .weights td.rank { grid-area: rank; align-self: start; padding-top: 3px; }
+  /* A long term wraps; a long unbroken one still may not widen the card. */
+  .weights td.term { grid-area: term; overflow-wrap: anywhere; }
+  /* display:contents so the bar itself is the grid item — the cell around it
+     has no job here beyond holding it. */
+  .weights td.level { display: contents; }
+  .weights td.level > .bar { grid-area: bar; }
+  .weights td.weight { grid-area: step; }
+  .weights td.del { grid-area: drop; justify-self: end; text-align: right; }
+
+  /* The width rules above are column sizing for a table that is no longer
+     one; left in place they set min-widths on grid items instead. */
+  .weights .rank, .weights .level,
+  .weights td:nth-child(4), .weights td:last-child { width: auto; min-width: 0; }
+}
+.tag.low { margin-left: var(--s3); color: var(--slate); border-color: var(--dim); }
+.lines td:first-child { font-weight: 600; }
+.lines td:last-child { text-align: right; font-weight: 600; white-space: nowrap; }
+
+/* A legend swatch, so the tile colours on the running screen say what they
+   mean rather than needing the tooltip. */
+.key { margin-left: var(--s4); }
+.key::before {
+  content: ""; display: inline-block; width: 8px; height: 8px;
+  margin-right: var(--s2); border: 1px solid var(--rule); background: var(--well);
+  vertical-align: baseline;
+}
+.key.paid::before { background: var(--paid); }
+.key.free::before { background: var(--free); }
+
+/* ---- Listings ----------------------------------------------------------- */
+
+/* Its own scroll box on both axes. overflow-x alone let a 989-row shortlist
+   scroll the page body, which is the defect
+   test_the_results_table_scrolls_inside_its_own_box pins: that test reads
+   these two declarations, so do not move them inline or drop either one. */
+/* No max-height any more. A 70vh scroll box inside a scrolling page is two
+   scrolls fighting each other under one thumb, and on a phone the inner one
+   wins wherever the finger lands — so the page could not be scrolled past
+   the job list at all without finding its edge. The page scrolls once; below
+   48rem this stops being a scroll container entirely (see the reflow). */
+.listings { overflow: auto; min-width: 0; contain: paint; }
+.tag {
+  display: inline-block; margin: 0 var(--s2) var(--s2) 0;
+  padding: 1px var(--s2);
+  font-size: 12px; line-height: 18px; color: var(--warm);
+  background: var(--well); border: 1px solid var(--rule); border-radius: var(--radius);
+}
+
+/* ---- Weight stepper ----------------------------------------------------- */
+
+.stepper { display: inline-flex; align-items: stretch; }
+.stepper input[type="number"] {
+  width: 3.25rem; margin: 0; text-align: center;
+  border-radius: 0; border-left: 0; border-right: 0;
+  padding: var(--s3) 0;
+  /* The native spinners duplicate the buttons either side of them. */
+  appearance: textfield; -moz-appearance: textfield;
+}
+.stepper input[type="number"]::-webkit-inner-spin-button,
+.stepper input[type="number"]::-webkit-outer-spin-button { appearance: none; margin: 0; }
+.stepper button {
+  width: 2rem; flex: none;
+  font: 600 15px/1 var(--text); color: var(--chalk);
+  background: var(--surface-high); border: 1px solid var(--control);
+  border-radius: var(--radius) 0 0 var(--radius); cursor: pointer;
+}
+.stepper button:last-child { border-radius: 0 var(--radius) var(--radius) 0; }
+.stepper button:hover { background: var(--surface-edge); color: var(--chalk-lift); }
+
+/* Remove: a checkbox, so a term can be un-removed before submitting and the
+   screen still works with no JavaScript — drawn as the word it is. It reads
+   "Remove" until ticked and "Undo" after, and ticking it strikes the row. */
+.remove { display: inline-flex; align-items: center; cursor: pointer; }
+.remove input { position: absolute; opacity: 0; width: 0; height: 0; }
+.remove-ui {
+  display: inline-flex; align-items: center; min-height: 24px;
+  font: 500 13px/1.2 var(--text); color: var(--warm);
+  text-decoration: underline; text-underline-offset: 3px;
+}
+.remove:hover .remove-ui { color: var(--over); }
+.remove input:focus-visible + .remove-ui {
+  outline: 2px solid var(--chalk); outline-offset: 2px;
+}
+.remove-on { display: none; }
+.remove input:checked + .remove-ui { color: var(--over); }
+.remove input:checked + .remove-ui .remove-off { display: none; }
+.remove input:checked + .remove-ui .remove-on { display: inline; }
+/* The TERM, not the first cell — the first cell is the rank now, and a
+   struck-through number reads as a typo rather than as a removal. */
+.weights tr:has(.remove input:checked) .term {
+  text-decoration: line-through; color: var(--slate);
+}
+.weights tr:has(.remove input:checked) .stepper { opacity: .4; }
+
+/* ---- Empty, in-flight and submitting states ----------------------------- */
+
+/* Alpine sets display on init; without this, anything gated only by x-show
+   flashes visible on every page load before it boots. */
+[x-cloak] { display: none !important; }
+
+/* An empty state is an instruction, not an apology: dashed to read as a slot
+   with nothing in it yet, rather than a panel that failed. */
+.empty {
+  padding: var(--s5); text-align: left;
+  color: var(--slate); border: 1px dashed var(--dim);
+  border-radius: var(--radius);
+}
+.empty b { display: block; color: var(--chalk); margin-bottom: var(--s2); }
+
+/* Figures being re-priced. Dimmed rather than replaced by placeholders: the
+   previous number is still the best information available for the ~100ms the
+   estimate is in flight, and blanking it would flicker the money on every
+   keystroke. The label beside it says it is not final.
+
+   To --pending-dim (.85), the one level the whole product waits at, and never
+   the .5 this was (muted text at .5 is 2.34:1). Bound to `stale` (price.js),
+   which is "from the change until the newest question is answered"; an answer
+   that was an error leaves the last good figures dimmed beside it for as long
+   as that lasts. Every dimmed region also lifts --slate to --pending-slate:
+   see the Motion section. */
+.headline-figure.updating,
+.lines.updating,
+.meter.updating { opacity: var(--pending-dim); --slate: var(--pending-slate); }
+
+/* A submitted form. The button is disabled by Alpine; this is the note that
+   says why nothing is happening yet. */
+.sending { color: var(--free); }
+.sending::before {
+  content: ""; display: inline-block;
+  width: 7px; height: 7px; margin-right: var(--s2);
+  border-radius: 50%; background: var(--free);
+  animation: pulse 1s ease-in-out infinite;
+}
+@keyframes pulse { 50% { opacity: .25; } }
+
+/* The weight editor beside the control that applies it. One column until
+   there is room for the 34rem table and a panel next to it. */
+.rerank { display: grid; gap: var(--s5); align-items: start; }
+@media (min-width: 64rem) {
+  .rerank { grid-template-columns: minmax(0, 36rem) 20rem; }
+}
+
+/* Marks a control that moves the estimate. Amber is money everywhere else in
+   this palette, so the mark needs no legend of its own beyond the footnote. */
+.costs {
+  color: var(--paid); font-weight: 700;
+  padding-left: 2px; vertical-align: super; font-size: 11px;
+}
+.footnote {
+  margin-top: var(--s3); padding-top: var(--s5);
+  border-top: 1px solid var(--rule);
+}
+.footnote .costs { vertical-align: baseline; font-size: 13px; }
+
+/* ---- Location picker ---------------------------------------------------- */
+
+/* A field that holds chips and opens a menu. The box is styled as an input
+   because that is what it behaves like, but it is a div: a <button> may not
+   contain the per-chip remove buttons, and those have to be real buttons. */
+.picker { position: relative; }
+.picker-box {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2);
+  min-height: 2.6rem; padding: var(--s3) var(--s4);
+  background: var(--well); border: 1px solid var(--control);
+  border-radius: var(--radius); cursor: pointer;
+}
+.picker-box:hover { border-color: var(--slate); }
+/* The toggle is the whole field until a chip is in it: a real <button>, so
+   Enter and Space work without a keydown handler reimplementing them, and it
+   stretches so the click target is the box rather than the caret. */
+.picker-toggle {
+  flex: 1 1 8rem; min-width: 0; display: flex; align-items: center;
+  gap: var(--s2); padding: 0; margin: 0;
+  background: none; border: 0; cursor: pointer;
+  font: inherit; color: inherit; text-align: left;
+}
+.picker-caret { margin-left: auto; color: var(--slate); font-size: 11px; }
+.tag.pick {
+  display: inline-flex; align-items: center; gap: var(--s2); margin: 0;
+  color: var(--chalk); border-color: var(--slate);
+}
+.pick-x {
+  padding: 0; border: 0; background: none; cursor: pointer;
+  color: var(--slate); font-size: 13px; line-height: 1;
+}
+.pick-x:hover { color: var(--over); }
+
+/* Anchored to the field and above everything after it, so a long menu does
+   not push the rest of the form down the page every time it opens. */
+.picker-menu {
+  position: absolute; z-index: 30; left: 0; right: 0; top: calc(100% + 4px);
+  max-height: 20rem; overflow-y: auto;
+  display: flex; flex-direction: column; gap: var(--s2);
+  padding: var(--s4); background: var(--surface-high);
+  border: 1px solid var(--surface-edge); border-radius: var(--radius);
+}
+/* The menu is rendered by one x-for per GROUP and one per option inside
+   it, and Alpine's <template x-for> needs a single root element — so each
+   group gets a wrapper that must not become a flex item of its own, or the
+   headings and options would stack inside it and lose the column gap. */
+.picker-group { display: contents; }
+.picker-menu .label { margin: var(--s3) 0 0; }
+.picker-menu .choice { padding: var(--s2) var(--s3); }
+
+/* ---- Arrivals ----------------------------------------------------------- */
+
+/* Newest on top. A line that arrives after the page did writes in (Motion, below); the ones
+   that were there when it loaded are simply there, and a poll that changes nothing
+   changes nothing on screen, because Alpine keys a row on the engine's own identity and
+   leaves it in place. */
+.feed { list-style: none; margin: 0; padding: 0; }
+.feed li {
+  display: flex; align-items: baseline; gap: var(--s4);
+  padding: var(--s3) 0; border-top: 1px solid var(--rule);
+}
+.feed li:first-child { border-top: 0; padding-top: 0; }
+.feed li > span:first-child { flex: 1 1 auto; min-width: 0; }
+/* Recency was carried by dulling each row down the list (.88 to .35
+   opacity), which took the company line to 1.75:1 at the bottom. The newest
+   row keeps --chalk while the ones it pushes down settle to --warm, both far
+   above AA. */
+.feed b { display: block; color: var(--warm); }
+.feed li:first-child b { color: var(--chalk); }
+.feed .meta { display: block; margin-top: var(--s1); }
+.feed-score {
+  flex: none; font-family: var(--display); font-size: 15px; font-weight: 700;
+  letter-spacing: -0.02em; color: var(--warm);
+}
+
+/* ---- The mark ----------------------------------------------------------- */
+
+.mark { display: block; flex: none; }
+.lockup {
+  display: inline-flex; align-items: center; gap: var(--s3);
+  color: inherit; text-decoration: none;
+}
+.lockup strong {
+  font-family: var(--display); font-size: 22px; font-weight: 700;
+  letter-spacing: -0.02em; color: var(--chalk);
+}
+
+/* ---- The working screen ------------------------------------------------- */
+
+.working {
+  display: flex; flex-direction: column; align-items: flex-start;
+  gap: var(--s5); max-width: 44rem;
+}
+.working h1 { margin: 0; }
+.working .lede { margin: 0; }
+/* The form is a flex child of .working, so its own children need the gap
+   spelled out — without it the progress bar sat flush against the button. */
+.working form {
+  display: flex; flex-direction: column; align-items: flex-start;
+  gap: var(--s5);
+}
+
+/* Nothing enters on this screen. Its motion is the loop below and the activity row
+   under the headline: one breath per screen, and no entrance on a screen whose job is
+   to wait. */
+/* The headline used to breathe. It was the only sign of life on the screen
+   and it had to be; now the activity row below it carries that, and two
+   things pulsing out of step is the noise this product spends its motion
+   budget avoiding. One breath per screen. */
+
+/* Indeterminate on purpose. There is no progress to report — one model call
+   either returns or it doesn't — and a bar that crept to 90%% and waited
+   would be inventing a figure, which is the same lie the meter refuses to
+   tell about money. */
+.working-bar {
+  width: 22rem; max-width: 100%; height: 4px;
+  background: var(--well); border-radius: 2px; overflow: hidden;
+}
+.working-bar span {
+  display: block; width: 40%; height: 100%;
+  background: var(--chalk); border-radius: 2px;
+  animation: slide 1.15s ease-in-out infinite;
+}
+@keyframes slide {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(250%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .working-bar span { animation: none; width: 100%; opacity: .5; }
+}
+
+/* ---- Still going --------------------------------------------------------
+
+   One row under the heading: a dot that says the run is alive, the count in
+   words, and a determinate bar of done/planned. Everything in it comes from
+   fields the page already polls, so it cannot drift from the tiles below it.
+
+   Sized and coloured off the meter, which is this product's existing bar —
+   same 8px track, same well, same amber. It is not a second design. */
+.activity {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: var(--s2) var(--s4);
+}
+.activity-said {
+  display: flex; align-items: center; gap: var(--s3);
+  flex: none; margin: 0;
+}
+.activity-said > b { font-size: 13px; font-weight: 600; color: var(--chalk); }
+.activity-count { font-size: 12px; color: var(--slate); }
+
+/* The same dot, the same breath, the same three tones as the run strip in
+   the header. Chalk while it runs, teal when it is done, quiet otherwise. */
+.activity-dot {
+  flex: none; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--slate);
+}
+.activity.live .activity-dot { background: var(--chalk); }
+.activity.done .activity-dot { background: var(--free); }
+.activity.done .activity-said > b { color: var(--free); }
+.activity.live .activity-dot { animation: runpulse 2s ease-in-out infinite; }
+
+.activity-track {
+  flex: 1 1 14rem; min-width: 10rem; height: 8px;
+  background: var(--well); border: 1px solid var(--rule); border-radius: 4px;
+  overflow: hidden;
+}
+/* Transitioned, not animated (Motion, below): it moves when the server says a
+   search finished and at no other time. */
+.activity-fill {
+  display: block; height: 100%; width: 0;
+  background: var(--chalk); border-radius: 4px;
+}
+.activity.done .activity-fill { background: var(--free); }
+.activity-pct {
+  flex: none; font-size: 12px; font-variant-numeric: tabular-nums;
+  color: var(--slate);
+}
+
+/* The global reduced-motion rule above already stops every animation and
+   transition. These two lines only make sure what is LEFT is still legible:
+   a pulse frozen mid-fade must not leave the dot at 35% opacity, and the bar
+   must still show its width rather than none. */
+@media (prefers-reduced-motion: reduce) {
+  .activity-dot { opacity: 1; }
+  .activity-fill { transition: none; }
+}
+
+/* On a phone the bar takes its own line rather than being squeezed to a
+   stub beside the words. */
+@media (max-width: 40rem) {
+  .activity-said { flex: 1 1 100%; }
+  .activity-pct { margin-left: auto; }
+}
+
+/* The free sweep has no fraction to show, so the row carries the indeterminate
+   bar instead of the determinate one. Same row, same dot, same breath. The
+   résumé parse is the third screen with no fraction and uses it too. */
+.activity > .working-bar { flex: 1 1 14rem; width: auto; }
+
+/* ---- Reading a résumé ---------------------------------------------------
+
+   The parse is one opaque model call and can run for tens of seconds on a
+   cold container. The hero stays narrow and legible; everything explaining
+   the wait sits below it at full width, so the screen is intentional rather
+   than a headline stranded above an empty page. */
+.derive-more { margin-top: var(--s6); }
+.derive-more .panel h2 { margin-bottom: var(--s3); }
+
+/* The shape of the profile being built. Two columns on anything wider than a
+   phone: four of these in one column is a long thin list, not a preview. */
+.preview-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--s4);
+}
+.preview {
+  display: grid; gap: var(--s2); align-content: start;
+  padding: var(--s4); border: 1px solid var(--rule); border-radius: var(--radius);
+  background: var(--surface-low);
+}
+.preview .label { margin-bottom: var(--s1); }
+@media (max-width: 30rem) { .preview-grid { grid-template-columns: 1fr; } }
+
+/* Only here. The free sweep's shortlist skeleton stays still on purpose —
+   nothing can fill it for five minutes, so movement there would be a claim.
+   This one genuinely fills in tens of seconds and the page navigates itself
+   when it does, so a slow sweep across the bones is true. Staggered off the
+   position. */
+@keyframes bone-sweep {
+  0%, 100% { opacity: .35; }
+  50%      { opacity: .7; }
+}
+.preview .bone { animation: bone-sweep 2.4s ease-in-out infinite; }
+.preview .bone:nth-child(3) { animation-delay: .2s; }
+.preview .bone:nth-child(4) { animation-delay: .4s; }
+.preview:nth-child(2) .bone { animation-delay: .3s; }
+.preview:nth-child(3) .bone { animation-delay: .6s; }
+.preview:nth-child(4) .bone { animation-delay: .9s; }
+/* The blanket reduced-motion rule stops all of that. These keep the bones
+   visible at their own opacity rather than frozen at the dim keyframe. */
+@media (prefers-reduced-motion: reduce) { .preview .bone { opacity: .5; } }
+
+.bone.w-35 { width: 35%; } .bone.w-40 { width: 40%; }
+.bone.w-45 { width: 45%; } .bone.w-50 { width: 50%; }
+.bone.w-55 { width: 55%; } .bone.w-60 { width: 60%; }
+.bone.w-65 { width: 65%; } .bone.w-70 { width: 70%; }
+
+/* ---- Passes, not a meter ------------------------------------------------
+
+   The free pass returns everything at the end, so there is no percentage
+   that is true until it is 100. What CAN be said is which pass is under way,
+   and that is what this is: four rows, one marked, marked only where the run
+   state or a row that actually exists says so. */
+.stages { list-style: none; margin: 0; padding: 0; }
+.stages li {
+  display: grid; grid-template-columns: auto 1fr; column-gap: var(--s4);
+  padding: var(--s3) 0;
+  border-top: 1px solid var(--rule);
+}
+.stages li:first-child { border-top: 0; }
+.stages li > b { font-size: 13px; font-weight: 600; color: var(--warm); }
+.stages li > .meta { grid-column: 2; }
+/* The marker. A ring for what is coming, a filled dot for what is under way,
+   a tick for what is behind. */
+.stages li::before {
+  content: ""; grid-row: 1 / span 2; align-self: start;
+  margin-top: 5px; width: 9px; height: 9px; border-radius: 50%;
+  border: 1px solid var(--dim); background: transparent;
+}
+.stages li.done::before { content: "\2713"; border: 0; margin-top: 0;
+  width: auto; height: auto; font-size: 11px; color: var(--free);
+  line-height: 1.5; }
+.stages li.done > b { color: var(--slate); }
+.stages li.now::before { border-color: var(--chalk); background: var(--chalk); }
+.stages li.now > b { color: var(--chalk); }
+.stages li.next > b { color: var(--slate); }
+.stages li.next > .meta { color: var(--slate); }
+/* Only the pass actually under way breathes, and only while the run is. The
+   class comes off with p.state, so a stopped sweep settles by itself. */
+.stages:not(.settled) li.now::before {
+  animation: runpulse 2s ease-in-out infinite;
+}
+.stages.settled li.now::before { border-color: var(--slate); background: var(--slate); }
+
+/* ---- A list that is prose, not data -------------------------------------
+   Used where a panel explains something: a bold lead and a quiet line under
+   it. No bullets — the bold is the bullet. */
+.plain { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s4); }
+.plain li { display: grid; gap: var(--s1); }
+.plain li > b { font-size: 13px; font-weight: 600; color: var(--warm); }
+.numeral-inline { margin: 0; color: var(--warm); }
+.numeral-inline b { font-size: 20px; color: var(--chalk); font-weight: 700; }
+
+/* ---- The shape the results will take ------------------------------------
+   Not a loading skeleton pretending rows are on their way: on this path they
+   are not, for about five minutes. It is the shape of the panel, dimmed, with
+   the sentence under it saying exactly that. So it does not shimmer either. */
+.skeleton { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--s4); }
+.skeleton li { display: grid; gap: var(--s2); opacity: .45; }
+.bone { display: block; height: 9px; border-radius: 3px; background: var(--rule); }
+.bone.w-title  { width: 62%; height: 11px; }
+.bone.w-title2 { width: 48%; height: 11px; }
+.bone.w-title3 { width: 55%; height: 11px; }
+.bone.w-meta   { width: 34%; }
+
+/* The whole box is the control. A <label> wrapping the input gives
+   click-to-browse with no script at all, so only the drop needs Alpine —
+   what this replaces was a 6rem native "Choose File" button sitting in the
+   middle of an otherwise empty panel. */
+.drop {
+  position: relative; display: flex; flex-direction: column;
+  align-items: center; gap: var(--s3); text-align: center;
+  padding: var(--s6) var(--s5); cursor: pointer;
+  background: var(--well); border: 1px dashed var(--control);
+  border-radius: var(--radius);
+}
+.drop:hover, .drop.over { border-color: var(--chalk); background: var(--surface-low); }
+/* Off-screen rather than display:none: a hidden input cannot be focused, and
+   the focus ring on this label is the whole keyboard path to the control. */
+.drop > input[type="file"] {
+  position: absolute; width: 1px; height: 1px;
+  padding: 0; border: 0; opacity: 0;
+}
+.drop strong {
+  font-family: var(--display); font-size: 15px; font-weight: 600;
+  color: var(--chalk);
+}
+.drop .meta { max-width: 34ch; }
+.drop .glyph { width: 38px; height: 38px; color: var(--slate); }
+.drop:hover .glyph, .drop.over .glyph { color: var(--chalk); }
+
+/* Something is chosen: the box shrinks to the line that offers what is left. */
+.drop.compact {
+  flex-direction: row; justify-content: center; gap: var(--s4);
+  padding: var(--s4) var(--s5);
+}
+.drop.compact .meta { display: none; }
+.drop.compact .glyph { width: 22px; height: 22px; }
+
+.upload-form { display: flex; flex-direction: column; gap: var(--s5); }
+.upload-form > .error { margin: 0; }
+
+/* The files that will actually be sent: ruled rows, the name and its size and
+   the one way out, not a card each. */
+.picked h3 { margin: 0 0 var(--s3); }
+.picked-list { list-style: none; margin: 0; padding: 0; border-bottom: 1px solid var(--rule); }
+.picked-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center;
+  gap: var(--s5); margin: 0; padding: var(--s3) 0; border-top: 1px solid var(--rule);
+}
+.pick-name { font-weight: 500; color: var(--chalk); overflow-wrap: anywhere; }
+.picked-row .meta { min-width: 4rem; text-align: right; }
+
+/* The way on sits beside the line that qualifies it, and is the strongest
+   thing on the screen. */
+.upload-foot {
+  display: flex; flex-wrap: wrap; align-items: center;
+  justify-content: space-between; gap: var(--s4) var(--s6);
+}
+.upload-note { display: flex; flex-direction: column; gap: var(--s3); flex: 1 1 20rem; min-width: 0; }
+.upload-note p { max-width: 54ch; color: var(--warm); }
+.upload-note .meta { color: var(--warm); }
+/* Shrinkable for the reason .panel-foot's is: the note that appears beside the
+   button once the form is sent must wrap inside this, not push the button off. */
+.upload-foot .actions { flex: 0 1 auto; min-width: 0; }
+.problems { margin: 0; padding-left: 1.2em; }
+
+/* Label/value rows: what this screen hands the next one. */
+.facts { margin: 0; display: flex; flex-direction: column; }
+.facts > div {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: var(--s4); padding: var(--s3) 0; border-top: 1px solid var(--rule);
+}
+.facts > div:first-child { border-top: 0; padding-top: 0; }
+.facts dt { color: var(--slate); font-size: 12px; }
+.facts dd {
+  margin: 0; text-align: right; white-space: nowrap;
+  font-family: var(--display); font-weight: 700; color: var(--chalk);
+}
+/* A value nothing has produced yet reads as absent, not as a zero. */
+.facts dd.pending {
+  font-family: var(--text); font-size: 12px; font-weight: 500; color: var(--slate);
+}
+
+/* The submit sits at the foot of the panel beside the note that qualifies
+   it, instead of tucked under the fields with the panel empty below. */
+.panel-foot {
+  display: flex; flex-wrap: wrap; align-items: center;
+  justify-content: space-between; gap: var(--s5);
+  padding-top: var(--s5); border-top: 1px solid var(--rule);
+}
+.panel-foot > p { flex: 1 1 22rem; margin: 0; color: var(--warm); }
+/* Shrinkable, and 0 rather than `none`. `flex: none` froze this block at its
+   own max-content, which on the upload screen is the submit button PLUS the
+   "Reading your résumé…" note that appears beside it the moment the form is
+   sent — 432px of it, inside a 324px panel. The button was pushed clean off
+   the right of the card and took the page's scroll width with it. .actions
+   already wraps; it just has to be given a width it can wrap inside. */
+.panel-foot .actions { flex: 0 1 auto; min-width: 0; }
+/* Teal is this palette's "costs nothing", which is exactly what the note
+   says — so the emphasis carries the meaning rather than decorating it. */
+.free-note b { color: var(--free); }
+
+/* Two answers to one question. Equal-height cards put the shorter one's
+   slack under its button; this puts it above, so both buttons sit on the
+   same line and read as a comparison. */
+.choices > .panel > button { margin-top: auto; }
+
+/* What to expect, beside the form: ruled notes in one rail, not three cards of
+   equal weight. The upload form is the strongest thing on the screen. */
+.rail { display: flex; flex-direction: column; }
+.rail-block {
+  display: flex; flex-direction: column; gap: var(--s3);
+  padding: var(--s5) 0; border-top: 1px solid var(--rule);
+}
+.rail-block:first-child { border-top: 0; padding-top: 0; }
+.rail-block > p { font-size: 13px; line-height: 19px; color: var(--warm); max-width: none; }
+.rail-title { font: 600 14px/20px var(--text); letter-spacing: 0; }
+.rail-block > h2.label { font-family: var(--text); letter-spacing: 0; }
+.upload > .rail { position: static; }
+@media (max-width: 63.99rem) {
+  .upload > .rail { padding-top: var(--s5); border-top: 1px solid var(--rule); }
+}
+@media (min-width: 64rem) {
+  .upload > .rail { padding-left: var(--s6); border-left: 1px solid var(--rule); }
+}
+
+/* Export row. The label is part of the control, not a caption above it: the
+   count is what tells you which rows the file will hold, so it has to sit on
+   the same line as the buttons that produce it. */
+.exports { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s4); }
+.exports > .label { margin-right: var(--s2); }
+
+/* The overflow chip. Quieter than a matched skill, because it is a count of
+   what is hidden rather than one more thing that matched. */
+.tag.more { border-style: dashed; color: var(--slate); }
+
+/* ---- Results ------------------------------------------------------------- */
+
+/* The D3 Results prototype, made real (docs/design/prototype/results-rows.css).
+   A ruled list, not cards: the job and the suggested résumé lead, the match is
+   a right-aligned figure in the ledger's own numerals, and the same DOM becomes
+   one item per job on a phone. */
+
+/* Which jobs to show: tabs. Current is text colour, 600 and a 2px underline, so
+   it does not rest on colour alone; the others are warm. All Jobs plus at most
+   three résumés, so they wrap rather than scroll. */
+.views {
+  display: flex; flex-wrap: wrap; gap: 0 var(--s6);
+  border-bottom: 1px solid var(--rule);
+}
+.views a {
+  display: inline-block; max-width: 100%; padding: var(--s3) 0; margin-bottom: -1px;
+  font-weight: 500; color: var(--warm); text-decoration: none; overflow-wrap: anywhere;
+  border-bottom: 2px solid transparent;
+}
+.views a:hover { color: var(--chalk); }
+@media (pointer: coarse) { .views a { display: inline-flex; align-items: center; min-height: 44px; } }
+.views a[aria-current="page"] { color: var(--chalk); font-weight: 600; border-bottom-color: var(--chalk); }
+.views .n { font-weight: 500; color: var(--slate); white-space: nowrap; }
+.view-note { max-width: 62ch; margin-top: calc(var(--s2) * -1); font-size: 13px; line-height: 18px; color: var(--warm); }
+.view-note b { font-weight: 600; color: var(--chalk); }
+.view-note .file { overflow-wrap: anywhere; }
+
+/* One line of tools: what the list is sorted by, and two buttons. The line never
+   changes; whatever a button opens takes its own row under it. */
+.bar {
+  display: flex; flex-wrap: wrap; align-items: baseline;
+  gap: var(--s3) var(--s6);
+}
+.bar > .count { margin: 0 auto 0 0; font-size: 14px; line-height: 20px; color: var(--warm); }
+.bar > .count a { margin-left: var(--s3); }
+/* Filter and sort, and Export: the two ways to act on the list, drawn as the product's own outlined button (D7C: as
+   underlined words they were easy to read past). Separate buttons, each with the disclosure arrow that says it opens. */
+button.tool-toggle { display: inline-flex; align-items: center; gap: var(--s3); color: var(--chalk); }
+button.secondary.tool-toggle { padding: var(--s3) var(--s4); }
+.tool-toggle::before {
+  content: ""; flex: none; width: 0; height: 0; border: 4px solid transparent;
+  border-left-color: var(--slate); border-right-width: 0;
+  transform-origin: 2px 50%; transition: transform .15s ease;
+}
+.tool-toggle[aria-expanded="true"]::before { transform: rotate(90deg); }
+.tool-toggle:hover::before { border-left-color: var(--chalk); }
+.tool-panel { flex: 1 0 100%; order: 2; }
+.tool-panel form { display: flex; flex-direction: column; gap: var(--s5); }
+.tool-panel form > button { align-self: flex-start; }
+.tool-panel .exports + .meta { margin-top: var(--s3); }
+
+/* A section is a heading over ruled rows; there is no box around it. */
+.jobs-section { display: flex; flex-direction: column; gap: var(--s3); min-width: 0; }
+.jobs-section h2 { margin: 0; }
+.section-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2) var(--s4); }
+.section-note { max-width: 62ch; margin: 0; }
+.no-results {
+  display: flex; flex-direction: column; gap: var(--s4); max-width: 62ch;
+  padding-left: var(--s5); border-left: 2px solid var(--control);
+}
+.no-results h2, .no-results p { margin: 0; }
+
+/* The rows. Fixed layout and one set of widths, so the columns of every section
+   (and every résumé's view) start at the same x; the job takes what is left. A
+   table narrower than 72rem scrolls inside its own box, as it always has. */
+.jobs { width: 100%; min-width: 72rem; border-collapse: collapse; table-layout: fixed; }
+.jobs th.did, .jobs td.did { width: 2.25rem; }
+.jobs th.m { width: 4.5rem; }
+.jobs th.loc, .jobs td.loc { width: 9rem; }
+.jobs th.pay, .jobs td.pay { width: 8rem; }
+.jobs th.exp, .jobs td.exp { width: 5.5rem; }
+.jobs th.src, .jobs td.src { width: 6rem; }
+.jobs th.skills, .jobs td.skills { width: 15rem; }
+.jobs th.act, .jobs td.act { width: 6rem; }
+.jobs th { padding: 0 var(--s5) var(--s3) 0; }
+.jobs th.m { text-align: right; padding-right: var(--s6); }
+.jobs td {
+  padding: var(--s4) var(--s5) var(--s4) 0; vertical-align: baseline;
+  font-size: 13px; line-height: 18px; color: var(--warm);
+}
+.jobs tbody tr:last-child td { border-bottom: 1px solid var(--rule); }
+/* The figure the eye scans down: a raw score, signed as it is, tabular. */
+.jobs td.score {
+  width: 4.5rem; padding-right: var(--s6); text-align: right;
+  font: 600 22px/26px var(--display); letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums; color: var(--chalk);
+}
+
+/* The job: title and company on one line, then what the engine says about
+   which résumé, caution first. */
+.jobs td.role { min-width: 22rem; }
+.jobs td.role p { margin: 0; max-width: none; }
+.job-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 var(--s3); }
+.job-line > b { font-size: 14px; line-height: 20px; font-weight: 600; color: var(--chalk); }
+.job-line .co { color: var(--warm); }
+
+.suggest {
+  margin-top: var(--s2); padding-left: 20px; max-width: 62ch;
+  border-left: 2px solid var(--control);
+  font-size: 13px; line-height: 18px; color: var(--chalk);
+  overflow-wrap: anywhere;
+}
+/* The suggested résumé carries the weight; one named after it is a step down,
+   and in a tie every name is the suggestion. */
+.rname { font-weight: 600; }
+.rpeer { font-weight: 500; }
+.rname2 { font-weight: 400; }
+/* A name stays whole, with the full stop, comma or bracket that follows it (.nb): it
+   moves to the next line as one piece, and that mark never stands on a line alone.
+   Labels are at most 40 characters, which fits a phone; on a very narrow one a name
+   may break inside rather than overflow. */
+.nb { white-space: nowrap; }
+@media (max-width: 22rem) { .nb { white-space: normal; } }
+/* A qualification, not an error: quiet, with a shape, never coral. */
+.caution {
+  display: flex; align-items: flex-start; gap: 6px;
+  margin-top: var(--s2); max-width: 62ch;
+  font-size: 12px; line-height: 16px; color: var(--warm); overflow-wrap: anywhere;
+}
+.caution b { font-weight: 600; }
+.bang {
+  flex: none; display: grid; place-items: center; width: 16px; height: 16px;
+  border: 1.5px solid var(--warm); border-radius: 50%; font: 700 12px/1 var(--text);
+}
+
+.jobs td.exp { white-space: nowrap; }
+.jobs td.none { color: var(--slate); }
+.jobs td.src { white-space: nowrap; color: var(--warm); }
+.paid-word { display: block; font-size: 12px; line-height: 16px; color: var(--slate); }
+.jobs td.skills .tag { margin: 0 var(--s2) var(--s2) 0; font-size: 12px; }
+.mlabel, .m-only { display: none; }
+
+/* Apply: the action of the row, so it is a word you can see is one. */
+.jobs td.act { padding-right: 0; text-align: right; white-space: nowrap; }
+.jobs td.act .apply {
+  display: inline-block; font: 600 14px/20px var(--text); color: var(--chalk);
+  text-decoration: underline; text-underline-offset: 3px;
+  padding-block: 4px; margin-block: -4px;
+}
+.jobs td.act .apply .go { margin-left: 0.35em; text-decoration: none; display: inline-block; }
+.jobs .posted { display: block; margin-top: 2px; font-size: 12px; color: var(--slate); }
+
+/* ---- Jobs as items, on a phone ------------------------------------------- */
+
+/* Below 48rem the table becomes one item per job, from the same DOM. Line 1:
+   the figure and the job. Then, at the full width rather than squeezed beside
+   the figure: the caution, the suggestion, the facts (each with its word; a
+   fact the job does not state is not drawn), the first three skills, and Apply
+   as a 44px target. */
+@media (max-width: 47.99rem) {
+  .listings { overflow: visible; contain: none; }
+  /* Tabs in a grid, so each has its own rule under it and the current one is
+     underlined on its own row, not floating above a rule that belongs to the
+     last row of a wrapped strip. */
+  .views { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border-bottom: 0; }
+  .views a { margin-bottom: 0; padding-right: var(--s3); border-bottom: 2px solid var(--rule); }
+  .views a[aria-current="page"] { border-bottom-color: var(--chalk); }
+  .jobs, .jobs tbody { display: block; min-width: 0; }
+  .jobs thead { display: none; }
+  .listings tr {
+    display: flex; flex-wrap: wrap; align-items: baseline;
+    padding: var(--s5); margin-bottom: var(--s4);
+    background: var(--surface); border: 1px solid var(--rule); border-radius: var(--radius);
+  }
+  /* The desktop rule that closes the last row (tbody tr:last-child td)
+     outranks anything written for a cell here, so its border is undone by
+     name, and display is left out of it: listing display on that selector
+     once pinned the last card's job cell and let an absent fact through. */
+  .jobs td { display: block; padding: 0; border: 0; }
+  .jobs tbody tr:last-child td { border-bottom: 0; }
+  .jobs td.did { display: none; }
+  .jobs td.score {
+    flex: 0 0 auto; width: auto; min-width: 3ch; padding: 0; margin-right: var(--s4);
+    text-align: left; font-size: 22px; line-height: 26px;
+  }
+  /* What the figure is, in a word under it: on a phone the column header is gone. */
+  .jobs td.score::after {
+    content: "match"; display: block; font: 500 12px/16px var(--text); color: var(--slate); letter-spacing: 0;
+  }
+  /* The cell steps aside so the title can sit beside the figure and the
+     recommendation can take the whole row under it. */
+  .jobs td.role { display: contents; min-width: 0; }
+  .job-line { flex: 1 1 0; min-width: 0; }
+  .job-line .co { flex: 0 0 100%; }
+  .job-line > b { font-size: 15px; overflow-wrap: anywhere; }
+  .jobs td.role::after { content: ""; flex: 0 0 100%; height: 0; }
+  .caution, .suggest { flex: 0 0 100%; max-width: none; margin-top: var(--s3); }
+  .caution + .suggest { margin-top: var(--s2); }
+  .jobs td.loc, .jobs td.pay, .jobs td.exp, .jobs td.src {
+    flex: 0 1 auto; width: auto; margin: var(--s3) var(--s5) 0 0;
+  }
+  .jobs td.pay, .jobs td.exp, .jobs td.src { white-space: normal; }
+  .jobs td.none { display: none; }
+  .mlabel { display: inline; color: var(--slate); }
+  .paid-word { display: inline; margin-left: var(--s2); white-space: nowrap; }
+  .paid-word::before { content: "("; }
+  .paid-word::after { content: ")"; }
+  .d-only { display: none; }
+  .tag.more.m-only { display: inline-block; }
+  .jobs td.skills { flex: 0 0 100%; width: auto; margin-top: var(--s4); }
+  .jobs td.skills:empty { display: none; }
+  .jobs td.skills .tag:not(.more):nth-child(n+4) { display: none; }
+  .jobs td.act {
+    flex: 0 0 100%; width: auto; display: flex; align-items: center; justify-content: space-between;
+    margin-top: var(--s4); padding-top: var(--s2); border-top: 1px solid var(--rule); text-align: left;
+  }
+  .jobs td.act .apply {
+    display: inline-flex; align-items: center; min-height: 44px; min-width: 44px;
+    padding-block: 0; margin-block: 0; padding-right: var(--s5);
+  }
+  .jobs .posted { display: inline; margin: 0; }
+
+  /* The dominant action goes full width. `align-self: flex-start` is right on
+     a desktop actions row and wrong in a 390px column, where it leaves the
+     one button the screen exists for floating in the left third. Only .big —
+     the button a screen was designed around — not every secondary control. */
+  button.big, a.big { align-self: stretch; width: 100%; text-align: center; }
+  .actions > button.big, .actions > a.big { flex: 1 1 100%; }
+}
+
+/* How many listings the section holds, beside its heading. */
+.head-note > b { color: var(--chalk); white-space: nowrap; }
+
+.section-foot {
+  display: flex; flex-wrap: wrap; align-items: baseline;
+  justify-content: space-between; gap: var(--s4);
+  margin-top: var(--s4); padding-top: var(--s4); border-top: 1px solid var(--rule);
+}
+
+/* ---- Review ------------------------------------------------------------- */
+
+/* What it read on the left, how it will score on the right — narrower
+   column first, because checking the reading comes before tuning the
+   scoring. .split's own rule is the reverse, and both are used. */
+@media (min-width: 60rem) {
+  .split.read-first { grid-template-columns: 23rem minmax(0, 1fr); }
+}
+
+/* A filename is user-supplied and has no spaces to break at. At 390px one
+   42-character name made the whole PAGE wider than the viewport — every
+   panel then laid out off-screen, not just this line. */
+.filename { overflow-wrap: anywhere; }
+
+/* A labelled finding: the label above, the value in a recessed box, so a
+   value the model got wrong is readable as a value rather than as prose. */
+.read-out + .read-out { margin-top: var(--s5); }
+.read-out > .inset { margin: var(--s2) 0 0; color: var(--chalk); }
+/* The name of a group of controls. Not .label: that names one field, in 12px;
+   this heads what several fields answer together. */
+.field-title { display: block; font: 600 14px/20px var(--text); color: var(--chalk); }
+/* ...and the gap it was missing: "Experience" sat flush on the "Years" label
+   under it, which read as one two-line label. */
+.read-out > .row, .read-out > .muted { margin-top: var(--s3); }
+
+/* Something the screen wants to say, rather than something it is showing.
+   The bar carries which kind: neutral for an explanation, money-coloured
+   for the one that changes what a sweep costs. */
+.callout {
+  padding: var(--s4) var(--s5); border-left: 2px solid var(--rule);
+  background: var(--surface-low); border-radius: 0 var(--radius) var(--radius) 0;
+  color: var(--warm); font-size: 12px; line-height: 1.5;
+}
+.callout > b { display: block; margin-bottom: var(--s2); color: var(--chalk); }
+.callout.warn { border-left-color: var(--paid); }
+.callout.warn > b { color: var(--paid); }
+
+/* The chips are the content, so the paragraph holding them carries no
+   leading of its own — .tag already spaces itself. */
+.chips { margin: 0 0 calc(var(--s2) * -1); }
+
+/* The way out and the way on, at opposite ends of one bar. */
+.actionbar {
+  display: flex; flex-wrap: wrap; align-items: center;
+  justify-content: space-between; gap: var(--s5);
+  padding-top: var(--s5); border-top: 1px solid var(--rule);
+}
+
+/* ---- The résumés, as a ledger -------------------------------------------- */
+
+/* Rules, not boxes: one ruled row per résumé, and the one being edited is the
+   only thing on the page with a border all the way round. The grid is a rank
+   numeral, the résumé's name, and its state; the body sits under the name. */
+.ledger { display: flex; flex-direction: column; }
+.resume {
+  display: grid;
+  grid-template-columns: 2.25rem minmax(0, 1fr) auto;
+  column-gap: var(--s5); row-gap: var(--s3); align-items: start;
+  padding: var(--s5) 0;
+  border-top: 1px solid var(--rule);
+}
+.resume-head { display: contents; }
+.resume-head .rank {
+  font: 600 17px/24px var(--display); color: var(--slate);
+  font-variant-numeric: tabular-nums;
+}
+.resume-id { min-width: 0; }
+.resume-id h2 { overflow-wrap: anywhere; }
+/* The file standing in for a label: cut in the middle like the line under one. */
+.resume-id h2.is-file { display: flex; min-width: 0; overflow-wrap: normal; }
+/* The file it came from: secondary, on one line, cut in the middle. */
+.resume .file {
+  display: flex; min-width: 0; max-width: 100%; margin-top: var(--s1);
+  font-size: 12px; line-height: 16px; color: var(--slate);
+}
+.file-head { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-tail { flex: none; white-space: nowrap; }
+.resume .status { align-self: start; padding-top: 4px; }
+.resume-body { grid-column: 2 / -1; min-width: 0; display: flex; flex-direction: column; gap: var(--s4); }
+/* Ready or reviewed: what it found and what to do with it, on one line. */
+.resume-body.line { flex-direction: row; flex-wrap: wrap; align-items: center; gap: var(--s3) var(--s6); }
+/* ...and the actions start in the same place on every row, whatever the count says. */
+.resume-body.line > p { min-width: 9rem; }
+.resume-body .actions { gap: var(--s3) var(--s5); }
+.resume-body > p { max-width: 62ch; }
+.resume .preview {
+  background: none; border: 0; padding: 0; max-width: 28rem; gap: var(--s3);
+}
+
+/* The one being edited. A border all the way round in the control colour and a
+   heavier rule on the left: a boundary that means "this is the one you are in",
+   and the only fill on the page. */
+.resume[data-open] {
+  padding: var(--s5) var(--s6) var(--s6);
+  margin: var(--s3) 0;
+  background: var(--surface);
+  border: 1px solid var(--control); border-left: 2px solid var(--chalk);
+  border-radius: var(--radius);
+}
+.resume[data-open] + .resume { border-top: 0; }
+.resume[data-open] .resume-body { gap: var(--s5); }
+/* A skill and its controls are read as one line: a reading width, not 1300px of
+   table with the name at one end and the stepper at the other. */
+.resume .scroll-x { max-width: 52rem; }
+/* The form's own stack is 24px; between a finding, its notes and its door
+   that is more air than the rules already give. */
+.review-form { gap: var(--s5); }
+
+/* ---- Status: a shape and a word --------------------------------------------
+   Six states, each a shape drawn beside its word, so a state is never a
+   colour alone. A ring waits, a ringed dot that breathes is being read, a dot
+   is ready, a tick is reviewed, a "!" could not be finished, a dash is left
+   out. Chalk for the ordinary ones, teal for done, coral for the error. */
+.status {
+  display: inline-flex; align-items: center; gap: var(--s3);
+  font: 500 12px/16px var(--text); color: var(--warm); white-space: nowrap;
+}
+.status::before { content: ""; flex: none; box-sizing: border-box; }
+.status.waiting::before { width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--slate); }
+/* A half-filled disc, the ordinary sign for "part way": a ringed dot is what a
+   selected radio button looks like, and a dot is what ready is. It breathes. */
+.status.reading::before {
+  width: 10px; height: 10px; border-radius: 50%; border: 1.5px solid var(--chalk);
+  background: linear-gradient(90deg, var(--chalk) 50%, transparent 50%);
+  animation: runpulse 2s ease-in-out infinite;
+}
+.status.ready { color: var(--chalk); }
+.status.ready::before { width: 10px; height: 10px; border-radius: 50%; background: var(--chalk); }
+.status.reviewed::before {
+  width: 11px; height: 6px; margin: 0 1px 3px;
+  border-left: 2px solid var(--free); border-bottom: 2px solid var(--free);
+  transform: rotate(-45deg);
+}
+.status.failed { color: var(--over); }
+.status.failed::before {
+  content: "!"; display: grid; place-items: center;
+  width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid var(--over);
+  font: 700 10px/1 var(--text);
+}
+.status.out { color: var(--slate); }
+.status.out::before { width: 10px; height: 2px; background: var(--slate); }
+/* Left out is said in the row's own type too, not only in the status word. */
+.resume:has(.status.out) h2 { color: var(--slate); }
+
+/* ---- What Sweep read, as ruled rows -------------------------------------- */
+
+/* The name of each finding on the left, the finding beside it. The top rule of
+   the first row is the line under the résumé's own heading. */
+.read { display: flex; flex-direction: column; }
+.read-block {
+  display: grid; grid-template-columns: minmax(9rem, 13rem) minmax(0, 1fr);
+  column-gap: var(--s6); row-gap: var(--s2);
+  padding: var(--s5) 0; border-top: 1px solid var(--rule);
+}
+.read-name { display: flex; flex-direction: column; gap: var(--s1); min-width: 0; }
+.read-name h3 { margin: 0; }
+.read-answer { display: flex; flex-direction: column; gap: var(--s3); min-width: 0; }
+.read-answer > p { max-width: 62ch; }
+/* The one sentence of each row that is the answer. */
+.read-lead { font-size: 15px; line-height: 22px; font-weight: 500; color: var(--chalk); }
+
+/* The reading's technical notes: a door, not a callout. */
+details.notes > summary {
+  font: 500 12px/16px var(--text); color: var(--warm); width: fit-content;
+}
+details.notes > p { margin-top: var(--s3); font-size: 12px; line-height: 18px; max-width: 62ch; }
+
+/* Adjust what Sweep looks for: a door under a rule, no box around it. */
+details.adjust { border-top: 1px solid var(--rule); padding-top: var(--s5); }
+details.adjust > summary > .meta { font-weight: 500; }
+
+/* ---- How a sweep ended -------------------------------------------------- */
+
+/* One line that names the state, at the top of the screen. The accent is
+   the only thing that differs between them: an ending is not decoration,
+   and four differently-shaped boxes would read as four unrelated events. */
+.banner {
+  display: flex; flex-wrap: wrap; align-items: center;
+  justify-content: space-between; gap: var(--s5);
+  padding: var(--s4) var(--s5);
+  border-left: 2px solid var(--slate); background: var(--surface);
+  border-radius: 0 var(--radius) var(--radius) 0;
+}
+.banner > div:first-child { flex: 1 1 24rem; }
+.banner b { display: block; font-size: 14px; color: var(--chalk); }
+.banner span { color: var(--warm); font-size: 12px; line-height: 1.5; }
+.banner.ok { border-left-color: var(--free); }
+.banner.ok b { color: var(--free); }
+.banner.warn { border-left-color: var(--over); }
+.banner.warn b { color: var(--over); }
+
+/* A search that never ran, once there is no longer any prospect of it
+   running on its own. Distinct from "not run YET", which is the same cell
+   while the sweep is still working through the grid. */
+.cell.parked {
+  border-style: dashed; color: var(--slate);
+}
+.key.parked::before { background: transparent; border: 1px dashed var(--dim); }
+
+/* ---- Motion -------------------------------------------------------------
+
+   Motion says what changed, and nothing else. docs/design/SWEEP_D7_MOTION_DIRECTION.md
+   argues it and docs/design/SWEEP_D7B_MOTION_INTEGRATION.md maps it onto the screens.
+   Five verbs carry all of it, and an effect that is none of them is not here:
+
+     PRESS      "I heard you": the 120ms colour and the 1px press on a control (with the controls).
+     WRITE IN   "this is new": opacity, nothing else. The first rows of Results when you arrive, a file
+                that was just accepted, a listing that just arrived.
+     DIM        "the old answer is still the best there is": a list or a figure at --pending-dim while a
+                newer answer is out, and the same level again as the new page settles in.
+     OPEN       "a thing appeared where you pressed": a tool panel, a menu, the feedback dialog.
+     MARK       "an authoritative state changed": a Progress ending, after the server said so.
+
+   Nothing travels, bounces, blurs or scales. A quick tab, filter or sort is an instant swap with no
+   motion at all, and a money figure is written, never counted. The heading, the tabs and the tools are
+   never animated.
+
+   Everything that moves is inside `no-preference`, so a browser that does not understand the query gets
+   no motion rather than the motion a blanket rule has to remember to cancel, and with reduced motion
+   nothing moves and the page is the same page: a state that is not motion (the dim) is outside the block
+   and is drawn at once. The blanket rule near the top of this file stays as the net under everything
+   else, the press and the chevrons included. Reduced motion is not a shorter animation.
+
+   Tokens, in the three layers the design-system skill lays out: primitives, then what they mean. Every
+   one is used. Durations were chosen on the built screens (D7A, section 4) and held through D7B. */
+:root {
+  /* primitives */
+  --ms-1: 120ms;   /* a control answering: the press tier */
+  --ms-2: 160ms;   /* a small state change: a dim, a mark, a figure's colour, a meter */
+  --ms-3: 200ms;   /* something arriving in place: a panel, a landing tile */
+  /* The curve the activity fill already used: fast off the mark, settling, no overshoot. Arrivals. */
+  --ease-settle: cubic-bezier(.22, .61, .36, 1);
+  --ease-leave: cubic-bezier(.4, 0, 1, 1);
+
+  /* meaning */
+  --row-fade: 140ms;        /* one result row writing in */
+  --row-step: 20ms;         /* between rows; capped at eight, so the whole arrival is 140 + 7 x 20 = 280ms designed */
+  --tool-in: var(--ms-3);   /* a tool panel opening */
+  --tool-out: 140ms;        /* and closing: leaving is quicker than arriving */
+  /* .85, not .7 and not the .5 the price used to dim to. Muted text (--slate) is 4.54:1 on the ground at .85,
+     3.45:1 at .7 and 2.34:1 at .5; AA needs 4.5:1, and a slow answer can hold the dim for seconds. */
+  --pending-dim: .85;
+  /* But --slate on --surface (a phone's result cards, the Configure panel, the console meter) is 5.18:1 at rest and
+     4.11:1 at .85, which is under AA. So a region that dims also lifts its muted tone, by about what the dim takes
+     away there: this is --slate a fifth of the way to --warm (4.61:1 on --surface and 5.10:1 on the ground, both
+     dimmed, measured on the rendered pages). Used only as `--slate: var(--pending-slate)` inside a dimmed region, so
+     at rest nothing changes and every muted word, border and hint in it follows. */
+  --pending-slate: #aa9885;
+}
+
+/* ---- DIM: the old answer, while the newest one is out -----------------------
+   Results: a same-page link or a valid GET form that has not been answered after 160ms marks <html>
+   .pending (the script at the end of the page), and the list, never the heading, tabs or tools, goes to
+   --pending-dim. It is never blanked: it is still the best information there is. A state, so it is drawn
+   at once with reduced motion too. Configure's figures dim through .updating (above, with the forms). */
+.pending .results-body { opacity: var(--pending-dim); --slate: var(--pending-slate); }
+
+/* A tool panel that is leaving is gone at once. Alpine keeps it on screen for the frame or two it waits before it
+   cleans up, and where nothing animates its height (reduced motion, Firefox, Safari) the other panel is already open
+   by then: the list under them would jump a panel lower for one frame and straight back. The height animation below
+   puts it back for as long as it takes to close. */
+.t-out { display: none; }
+
+@media (prefers-reduced-motion: no-preference) {
+
+  /* ---- WRITE IN --------------------------------------------------------------- */
+  @keyframes write-in { from { opacity: 0; } }
+
+  /* The first rows of Results, when you arrive from another stage of the product. `html.arrive` is set
+     before the first paint by the head script in results.html, and removed 500ms after the first frame:
+     it is a property of the DOCUMENT'S first moments, not of the rows, so a row that is replaced later
+     never replays it, and a tab, a filter, a sort, a reload, a resize, a visibility change or a poll
+     cannot start it. The first eight rows of the first section, three on a phone (about a card and a
+     half is visible at 390px); the rest of the page is simply there. Opacity only: no travel, no
+     scale, no blur. If the first section has fewer rows, nothing else is animated to make up the number. */
+  .arrive #results-body > .jobs-section:first-child .jobs tbody tr:nth-child(-n + 8) {
+    animation: write-in var(--row-fade) var(--ease-settle) both;
+    animation-delay: calc(var(--i) * var(--row-step));
+  }
+  .jobs tbody tr:nth-child(1) { --i: 0; } .jobs tbody tr:nth-child(2) { --i: 1; }
+  .jobs tbody tr:nth-child(3) { --i: 2; } .jobs tbody tr:nth-child(4) { --i: 3; }
+  .jobs tbody tr:nth-child(5) { --i: 4; } .jobs tbody tr:nth-child(6) { --i: 5; }
+  .jobs tbody tr:nth-child(7) { --i: 6; } .jobs tbody tr:nth-child(8) { --i: 7; }
+  @media (max-width: 47.99rem) {
+    .arrive #results-body > .jobs-section:first-child .jobs tbody tr:nth-child(n + 4) { animation: none; }
+  }
+
+  /* A file that was just accepted (Upload). The list is keyed, so only the new row is new; with one
+     file, the row is shown as it is picked. Removing one is not animated: it answers the press. */
+  .picked-row { animation: write-in var(--ms-2) var(--ease-settle) both; }
+
+  /* A listing that arrived after the Running screen loaded (running.html gives such a line .fresh for 400ms; the
+     ones there at load never get it, and a poll that changes nothing never adds it). No slide. */
+  .feed li.fresh > * { animation: write-in var(--ms-2) var(--ease-settle) both; }
+  .feed b { transition: color var(--ms-2) var(--ease-settle); }
+
+  /* ---- DIM: the wait ends with the cue it began with ---------------------------------------------
+     After a dim, the new page starts at that level and settles to full in 160ms, instead of popping.
+     `html.swap` is set by the head script only if the previous page had dimmed, so a quick answer has
+     no cue at all (an un-dim on every change is a dip the effect itself creates). An ordinary animation
+     on the live page, so a press during it is handled (a cross-document view transition swallows the
+     second of two rapid presses: D7A, section 9). */
+  @keyframes list-in { from { opacity: var(--pending-dim); } }
+  .swap .results-body { animation: list-in var(--ms-2) var(--ease-settle) both; }
+  .results-body { transition: opacity var(--ms-2) var(--ease-settle); }
+
+  /* The same dim on a re-priced figure (Configure), softened so that a fast answer is a hint of a dip and not a
+     blink. Every transition on these elements is named here, because a later rule replaces an earlier list
+     rather than adding to it. */
+  .headline-figure { transition: border-color var(--ms-2) var(--ease-settle), opacity var(--ms-2) var(--ease-settle); }
+  .lines, .meter { transition: opacity var(--ms-2) var(--ease-settle); }
+  /* The meter's real value, at the speed of a small state change. The NUMBER is never interpolated: it is
+     written (x-text), and the fill and its colour follow it. Crossing the cap is this colour and the words that
+     were already there: no overshoot and no shake. */
+  .headline-figure .numeral, .meter .numeral { transition: color var(--ms-2) var(--ease-settle); }
+  .meter-fill { transition: width var(--ms-2) var(--ease-settle), background-color var(--ms-2) var(--ease-settle); }
+
+  /* The search in flight. Same breath as .runbar-dot (one pulse vocabulary in the product, not two), on the
+     border alone so the cell never flashes: an opacity pulse took the cell's label to a third of its
+     strength at the trough, which is unreadable (measured 3.06:1). It ends by itself: the class is bound to
+     p.state === 'running', so a stopped or failed sweep drops it on the next tick. Liveness is the one loop
+     the product has; with reduced motion the cell keeps its solid border (.cell.running, above). */
+  @keyframes cellbreath { 50% { border-color: var(--control); } }
+  .cell.running { animation: cellbreath 2s ease-in-out infinite; }
+
+  /* A search finishing. The cell changes colour (amber or teal for done), over 160ms, on the cell that changed and
+     only then: a colour transition needs a change, so a reload with forty done tiles shows forty done tiles, and the
+     "Searches" panel opened later shows what is there. It used to land as well (scale .82 to 1, in a column ripple,
+     and again on every load); the fill says what changed, and a batch of a hundred tiles that land together is a
+     pulse, not news. */
+  .cell { transition: background-color var(--ms-2) var(--ease-settle), color var(--ms-2) var(--ease-settle), border-color var(--ms-2) var(--ease-settle); }
+
+  /* The determinate bar moves when the server says a search finished, and at no other time. */
+  .activity-fill { transition: width var(--ms-2) var(--ease-settle); }
+
+  /* ---- PRESS, in the press tier: the drop zone answering a file held over it ------------------- */
+  .drop { transition: border-color var(--ms-1) ease, background-color var(--ms-1) ease; }
+  .drop .glyph { transition: color var(--ms-1) ease; }
+
+  /* ---- OPEN -------------------------------------------------------------------------------------
+     Alpine adds and removes these classes (x-transition:*), and they exist only for the length of the move.
+     The half-open start state is inside `no-preference` so it is never painted for a reader who asked for no
+     motion. Where the browser can animate to and from `height: auto` (Chrome and Edge 129 and later), the
+     height, the row gap above and the opacity travel together, in place, so the list below is pushed down
+     smoothly instead of jumping. Everywhere else it opens with the fade and closes at once: the same panel,
+     the same focus, the same layout. Leaving is quicker than arriving. */
+  .t-in { transition: opacity var(--tool-in) var(--ease-settle); }
+  .t-from { opacity: 0; }
+  .t-to { opacity: 1; }
+  @supports (interpolate-size: allow-keywords) {
+    .tool-panel { interpolate-size: allow-keywords; }
+    .t-in, .t-out { overflow: clip; }
+    .t-out { display: block; }
+    .t-in { transition: height var(--tool-in) var(--ease-settle), margin-top var(--tool-in) var(--ease-settle), opacity var(--tool-in) var(--ease-settle); }
+    .t-out { transition: height var(--tool-out) var(--ease-leave), margin-top var(--tool-out) var(--ease-leave), opacity var(--tool-out) var(--ease-leave); }
+    /* margin-top cancels the flex row gap (.bar's --s3) that comes with the panel, once the panel is a gap tall. A flex
+       line cannot be shorter than nothing, so for its first 8px the list sits one gap lower than a straight line, and steps
+       back up by the same 8px when the panel is finally removed: a step of one gap at each end. It is the price of leaving
+       the bar's gap layout exactly as it was at rest. */
+    .t-from { opacity: 0; height: 0; margin-top: calc(-1 * var(--s3)); }
+    .t-to { opacity: 1; height: auto; margin-top: 0; }
+    /* One tool replacing the other: one closes while the other opens, and the list under them follows the sum of the
+       two heights. Closing quicker than opening, on another curve, made that sum rise and fall (the list dropped
+       17px and then rose 73px); on one duration and one curve it is a straight line between the two heights. */
+    .bar:has(.t-in):has(.t-out) .t-out { transition-duration: var(--tool-in); transition-timing-function: var(--ease-settle); }
+  }
+
+  /* A menu (the location picker): in at the speed of a press, out at once. It borrows the MARK start and end
+     states below, which are nothing but opacity. */
+  .menu-in { transition: opacity var(--ms-1) var(--ease-settle); }
+
+  /* The feedback dialog: in only, and its backdrop with it (the page would otherwise darken at once under a panel
+     that is still arriving). Native <dialog> keeps its own focus, Escape and backdrop: it starts transparent for
+     160ms and is focusable (its first field has focus) from the first frame. Closing is not animated. A browser
+     without @starting-style shows it at once. */
+  dialog.feedback[open], dialog.feedback[open]::backdrop { opacity: 1; transition: opacity var(--ms-2) var(--ease-settle); }
+  @starting-style { dialog.feedback[open], dialog.feedback[open]::backdrop { opacity: 0; } }
+
+  /* ---- MARK -------------------------------------------------------------------------------------
+     A Progress ending fades in (x-transition on the ending banners), and only after p.state has said so:
+     the animation is a consequence of the server's word, never a cause of it, and the heading and the text
+     are already the new words. An ending is never faded out. */
+  .m-in { transition: opacity var(--ms-2) var(--ease-settle); }
+  .m-from { opacity: 0; }
+  .m-to { opacity: 1; }
+}
+
+/* ---- Attached keys ------------------------------------------------------ */
+
+/* One row, one pill per key. A list rather than a count, because the screen
+   this sits on is the one where the number of keys is the problem. */
+.keys { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3); }
+.keys > .label { margin-right: var(--s2); }
+.keypill {
+  display: inline-flex; align-items: center; gap: var(--s3);
+  padding: var(--s2) var(--s2) var(--s2) var(--s4);
+  background: var(--well); border: 1px solid var(--rule);
+  border-radius: var(--radius); font-size: 12px;
+}
+.keypill > b { color: var(--chalk); font-weight: 600; }
+/* The masked tail is an identifier, so it is set like one. */
+.keypill > code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px; color: var(--slate); letter-spacing: 0.02em;
+}
+.keypill > .bal { color: var(--paid); font-weight: 600; }
+.keypill > form { display: contents; }
+.keyx {
+  display: grid; place-items: center; width: 1.4rem; height: 1.4rem;
+  flex: none; padding: 0; font: 400 15px/1 var(--text);
+  color: var(--slate); background: transparent; border: 0;
+  border-radius: var(--radius); cursor: pointer;
+}
+.keyx:hover { color: var(--ground); background: var(--over); }
+.keyx[disabled], .keyx[disabled]:hover {
+  color: var(--dim); background: transparent; cursor: default;
+}
+
+/* ---- Small targets on a fine pointer -------------------------------------
+   WCAG 2.5.8 asks 24x24. These were 18px summary rows, a 16px Apply link, an
+   18px "Manage your résumés" link and a 22px remove-key button. The hit area
+   grows by padding and is given back by a negative margin, so nothing moves
+   on the page: only the region that answers a click. Not applied to a coarse
+   pointer, whose rules below already make every one of these 44px — and a
+   negative margin on top of a 44px box would shrink the layout, not the hit
+   area. */
+@media (not (pointer: coarse)) {
+  details > summary { padding-block: 3px; margin-block: -3px; }
+  .section-foot a, .actionbar a.muted, .actionbar a.tertiary {
+    display: inline-block; padding-block: 4px; margin-block: -4px;
+  }
+  .pick-x {
+    min-width: 24px; min-height: 24px; margin: -6px -5px;
+    display: inline-flex; align-items: center; justify-content: center;
+  }
+  .picker-toggle { min-height: 24px; }
+  details.notes > summary { padding-block: 4px; margin-block: -4px; }
+}
+@media (not (pointer: coarse)) and (min-width: 48rem) {
+  .listings td.act .apply { display: inline-block; padding-block: 4px; margin-block: -4px; }
+}
+/* The whole field is the target, not the 18px line of text inside it. The
+   24px floor is for a fine pointer only: as a bare class it would outrank the
+   `button { min-height: 44px }` touch rule below (a class beats a type
+   selector whatever the order) and shrink the toggle on a phone. */
+.picker-toggle { align-self: stretch; }
+/* 1.4rem is 22px. */
+.keyx { min-width: 24px; min-height: 24px; }
+
+/* ---- Touch --------------------------------------------------------------
+   Measured, not guessed: .stepper button was 32x34, .remove 28x28, .pick-x
+   about 13x13 and .keyx similar. Applied on a COARSE pointer rather than at
+   a width, because the thing that decides this is the finger, not the
+   viewport — a touch laptop needs it and a narrow desktop window does not. */
+@media (pointer: coarse) {
+  .stepper button { min-width: 44px; min-height: 44px; }
+  .stepper input[type="number"] { min-height: 44px; width: 3.5rem; }
+  /* The brand lockup and the journey chips are navigation, and they were
+     26-31px tall. */
+  .lockup, .step > a { min-height: 44px; }
+  .listings td.act .apply, .section-foot a, .actionbar a.muted, .actionbar a.tertiary {
+    min-height: 44px; min-width: 44px;
+    display: inline-flex; align-items: center;
+  }
+  .remove, .remove-ui { min-height: 44px; min-width: 44px; }
+  .remove-ui { justify-content: flex-end; }
+  /* Padding rather than width: these sit inside a chip, so growing the box
+     would break the chip's own shape. The hit area grows, the ink does not. */
+  .pick-x, .keyx {
+    min-width: 44px; min-height: 44px;
+    display: inline-flex; align-items: center; justify-content: center;
+    margin: calc(var(--s3) * -1) calc(var(--s2) * -1);
+  }
+  button, .primary, .secondary, .tertiary, a.primary, a.secondary, a.tertiary { min-height: 44px; }
+  summary { min-height: 44px; display: flex; align-items: center; }
+  .tick { min-width: 44px; min-height: 44px; }
+}
+
+/* Importance badges on the review screen. Two badges sit side by side and
+   they answer different questions — what the RÉSUMÉ shows about this
+   person, and what the MARKET does with the word — so they must not read
+   as one scale. .tag.low (the market's "Common") is already the muted
+   grey; these three step up from it rather than colouring a verdict. */
+.tag.core { color: var(--chalk); border-color: var(--chalk); }
+.tag.strong { color: var(--chalk); border-color: var(--dim); }
+.tag.support { color: var(--slate); border-color: var(--dim); }
+
+/* ---- The résumé ledger on a phone ----------------------------------------
+   Composed, not collapsed: the name and its file first, then the state on its
+   own line, then the body. The one open for editing takes the whole width so
+   the editor is not squeezed by a rank column it has no use for. */
+@media (max-width: 40rem) {
+  .resume { grid-template-columns: 1.75rem minmax(0, 1fr); column-gap: var(--s4); }
+  .resume .status { grid-column: 2; grid-row: 2; padding-top: 0; }
+  .resume-body { grid-column: 2; grid-row: 3; }
+  .resume-body.line { column-gap: var(--s5); }
+  .resume[data-open] { padding: var(--s5) var(--s4); }
+  .resume[data-open] .resume-body { grid-column: 1 / -1; gap: var(--s5); }
+  .read-block { grid-template-columns: minmax(0, 1fr); row-gap: var(--s3); padding: var(--s4) 0; }
+  .read-name { flex-direction: row; align-items: baseline; justify-content: space-between; gap: var(--s4); }
+  /* The action at the foot is full width in the flow (not pinned), the same on
+     an open résumé and when every résumé is reviewed. */
+  .review-form .actionbar .actions, #resumes-continue .actions { flex: 1 1 100%; }
+  .review-form .actionbar .actions > .primary, #resumes-continue .actions > .primary,
+  #resumes-continue .actions > .secondary { flex: 1 1 100%; text-align: center; }
+}
+@media (pointer: coarse) {
+  a.tertiary { display: inline-flex; align-items: center; min-width: 44px; }
+  /* The stepper is a flex row and shrank the 3.5rem field to 42px. A floor of
+     the touch size fixes that without stopping it shrinking at all: pinned at
+     3.5rem it pushed two steppers 23px past a phone's narrower console panel. */
+  .stepper input[type="number"] { min-width: 44px; }
+}
+
+/* ---- Your résumés: the ledger, managed -------------------------------------
+   The same ruled rows as the review screen (name, file, status), with what you
+   can do to a row under it. Review is the outline; moving, leaving out and
+   renaming are words; Remove is a word too, set at the far end in the error
+   colour so a destructive action is recognisable without being a red button and
+   is never the word beside the one you meant. */
+ol.ledger { list-style: none; margin: 0; padding: 0; color: var(--chalk); }
+ol.ledger > li { margin: 0; }
+.name-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) var(--s5); min-width: 0; }
+.name-line h2 { min-width: 0; }
+/* Rename is a door under the name it renames, so it works without a script: the
+   field is in the page either way. */
+details.rename { min-width: 0; }
+details.rename > summary {
+  font: 500 13px/16px var(--text); color: var(--warm); width: fit-content;
+  text-decoration: underline; text-underline-offset: 3px;
+}
+details.rename > summary::before { display: none; }
+details.rename > summary:hover { color: var(--chalk); }
+details.rename[open] { flex: 1 1 100%; }
+details.rename .row { max-width: 32rem; }
+.resume-body .row-actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3) var(--s6);
+}
+.row-actions > span { display: flex; align-items: center; gap: var(--s6); }
+.row-actions > span:not(:has(*)) { display: none; }
+.row-actions .a-danger { margin-left: auto; }
+button.tertiary.danger { color: var(--over); }
+button.tertiary.danger:hover { color: var(--over); text-decoration-thickness: 2px; }
+.add { display: flex; flex-direction: column; gap: var(--s5); }
+.add.after { padding-top: var(--s6); border-top: 1px solid var(--rule); }
+@media (not (pointer: coarse)) {
+  details.rename > summary { padding-block: 4px; margin-block: -4px; }
+  .row-actions button.tertiary, .row-actions a.tertiary { padding-block: 4px; margin-block: -2px; }
+}
+/* A phone: the four groups fall into two lines on purpose. The first action and
+   in-or-out above; the moves, and Remove alone at the far end, below. Remove is
+   never stacked over the word you use most. */
+@media (max-width: 40rem) {
+  .resume-body .row-actions {
+    display: grid; grid-template-columns: auto auto minmax(0, 1fr);
+    grid-template-areas: "main state ." "arrange arrange danger";
+    gap: var(--s2) var(--s6);
+  }
+  .row-actions .a-main { grid-area: main; }
+  .row-actions .a-state { grid-area: state; }
+  .row-actions .a-arrange { grid-area: arrange; gap: var(--s5); }
+  .row-actions .a-danger { grid-area: danger; margin-left: 0; justify-self: end; }
+  /* The name, then the file with Rename at the end of its line, the same on every
+     row; an open Rename takes the line under them. */
+  .manage .resume-id { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--s4); align-items: baseline; }
+  .manage .name-line { display: contents; }
+  .manage .resume-id h2 { grid-column: 1 / -1; }
+  .manage .resume-id .file { grid-column: 1; grid-row: 2; }
+  .manage details.rename { grid-column: 2; grid-row: 2; justify-self: end; }
+  .manage details.rename[open] { grid-column: 1 / -1; grid-row: 3; justify-self: stretch; }
+  .upload-foot .actions { flex: 1 1 100%; }
+  .upload-foot .actions > .primary, .upload-foot .actions > .secondary { flex: 1 1 100%; text-align: center; }
+  .manage .resume-body { gap: var(--s3); }
+  .manage + .actionbar .actions { flex: 1 1 100%; }
+  .manage + .actionbar .actions > .primary { flex: 1 1 100%; text-align: center; }
+}
+
+/* ---- Search preferences: settings as ruled rows -----------------------------
+   What a group is, and what it means, on the left; the controls it is made of
+   on the right. The same shape as a finding on the review screen. A hairline
+   and space between groups, not a panel each; the choices keep their own edge
+   (.choice) because each is a thing to press. */
+.settings { display: flex; flex-direction: column; }
+.setting {
+  display: grid; gap: var(--s4); padding: var(--s6) 0;
+  border-top: 1px solid var(--rule);
+}
+.setting-head { display: flex; flex-direction: column; gap: var(--s3); min-width: 0; align-self: start; }
+.setting-head h2, .setting-head h3 { margin: 0; }
+.setting-head > p { font-size: 13px; line-height: 19px; max-width: 36ch; }
+.setting-title { font: 600 14px/20px var(--text); letter-spacing: 0; color: var(--chalk); }
+.setting-body { display: flex; flex-direction: column; gap: var(--s4); min-width: 0; align-self: start; }
+.setting-body > label { max-width: 26rem; }
+/* The marker is its own line under the name, so a wrapped heading does not run
+   into it. */
+.setting-head .affects { display: block; margin: var(--s1) 0 0; }
+.setting-body > .stepper { align-self: flex-start; }
+.setting-body > label.wide { max-width: 40rem; }
+@media (min-width: 48rem) {
+  .setting { grid-template-columns: minmax(11rem, 15rem) minmax(0, 1fr); column-gap: var(--s7); }
+}
+/* Advanced is a door between the rows, open on its own rows: no box of its own,
+   and its rows are the same rows. */
+details.advanced { border-top: 1px solid var(--rule); min-width: 0; }
+details.advanced > summary { padding: var(--s5) 0; margin-block: 0; }
+details.advanced > summary > h2 { margin: 0 auto 0 0; }
+details.advanced > summary > .meta { font-size: 12px; letter-spacing: 0; text-transform: none; color: var(--slate); }
+details.advanced > .advanced-body { margin-top: 0; }
+/* One panel beside the form: what this search is, and what it costs. */
+.summary-panel { gap: var(--s5); }
+.summary-cost { display: flex; flex-direction: column; gap: var(--s4); padding-top: var(--s5); border-top: 1px solid var(--rule); }
+.summary-panel > .summary-cost:first-child { border-top: 0; padding-top: 0; }
+
+/* ---- Preferences: the parts the critique found ------------------------------ */
+@media (min-width: 64rem) {
+  .split.upload, .split:has(> .settings) { column-gap: var(--s7); }
+}
+/* The global field rule's margin-top outranks .stepper's own margin: 0, so the
+   field sat 4px below the buttons either side of it. Here only, so the approved
+   review screen's steppers are as they were. */
+.setting-body .stepper input[type="number"]:not([hidden]):not([disabled]):not([readonly]) { margin-top: 0; }
+/* The location field's caret, drawn like the select's chevron: the glyph it
+   used was a 3px dot in the UI font. */
+.picker-caret {
+  width: 10px; height: 6px; font-size: 0; flex: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--slate) 50%),
+                    linear-gradient(135deg, var(--slate) 50%, transparent 50%);
+  background-position: 0 0, 5px 0; background-size: 5px 5px; background-repeat: no-repeat;
+}
+/* Over the credit the figure, its well and the sentence say so in the error
+   colour, with a shape beside the words: not one more amber number. Scoped to
+   this panel: Confirm's server-rendered `over` numeral is left for its phase
+   (it carries the class and still paints amber, because .headline-figure's
+   colour comes later in the file). */
+.summary-panel .headline-figure .numeral.over { color: var(--over); }
+.summary-panel .headline-figure:has(.numeral.over) { border-color: var(--over); }
+.summary-panel .headline-figure p.over:not(.numeral) { display: flex; align-items: flex-start; gap: var(--s3); }
+.summary-panel .headline-figure p.over:not(.numeral)::before {
+  content: "!"; flex: none; display: grid; place-items: center; box-sizing: border-box;
+  width: 14px; height: 14px; margin-top: 2px; border-radius: 50%; border: 1.5px solid var(--over);
+  font: 700 10px/1 var(--text);
+}
+/* The first action takes the same width whether it is a button (Review) or a word
+   (Edit), so in or out of the search is in the same place on every row. */
+@media (min-width: 40.01rem) { .row-actions .a-main { min-width: 5.25rem; } }
+
+/* ==== D5: Confirm ========================================================
+
+   The summary of WHAT is searched, the decision (what it costs, whether it can
+   be covered, the action), then the detail. One column on a phone in that
+   order, so the cost and the capacity sit above the action that authorises
+   them and nothing is pinned; two columns from 64rem with the decision on the
+   right. Ruled sections, no card per fact: the one boundary that means
+   something is the cost total. */
+.confirm { display: grid; gap: var(--s7); align-items: start; }
+.confirm > * { min-width: 0; }
+.confirm > .what, .confirm > .detail {
+  display: flex; flex-direction: column; gap: var(--s4);
+}
+.confirm > .detail, .confirm > .decide { border-top: 1px solid var(--rule); padding-top: var(--s6); }
+.confirm > :first-child { border-top: 0; padding-top: 0; }
+.confirm > .decide { display: flex; flex-direction: column; gap: var(--s5); }
+@media (min-width: 64rem) {
+  .confirm { grid-template-columns: minmax(0, 1fr) 24rem; column-gap: var(--s7); row-gap: var(--s7); }
+  .confirm > .what, .confirm > .detail { grid-column: 1; }
+  .confirm > .decide {
+    grid-column: 2; grid-row: 1 / span 2;
+    border-top: 0; padding-top: 0;
+    border-left: 1px solid var(--rule); padding-left: var(--s7);
+  }
+}
+
+/* What is searched: a ruled ledger, the answer beside its name. */
+.summary.ruled { gap: 0; }
+.summary.ruled > div { padding: var(--s4) 0; border-top: 1px solid var(--rule); }
+.summary.ruled > div:first-child { border-top: 0; padding-top: 0; }
+@media (min-width: 40rem) {
+  .summary.ruled > div {
+    display: grid; grid-template-columns: 9rem minmax(0, 1fr);
+    column-gap: var(--s5); align-items: baseline;
+  }
+}
+
+/* A free sweep, said as what it is: the boards, and that nothing is charged.
+   No figure at display size: a zero there was the loudest thing on the screen. */
+.decide-figure { margin: 0; font: 600 26px/1.2 var(--display); letter-spacing: -0.02em; color: var(--chalk); }
+.decide-figure b { font-weight: 700; }
+.decide-note { margin: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s3); color: var(--warm); }
+
+/* The cost total: amber, because it is money, and coral when the plan it prices
+   is one the connected accounts cannot cover. The well is the boundary that
+   means something here. */
+.decide .headline-figure .numeral { margin: 0; }
+.decide .headline-figure .numeral.over { color: var(--over); }
+.decide .headline-figure.is-over { border-color: var(--over); }
+.decide .headline-figure > p.muted { max-width: 34ch; }
+
+/* The capacity figures under the total, then the verdict in words and a shape:
+   a tick in teal when the engine's allocator says the full plan places, a "!"
+   in coral when it does not. Never the tick without the allocator's yes. */
+.capacity td:first-child { font-weight: 500; color: var(--warm); }
+.verdict { position: relative; margin: 0; padding-left: var(--s6); color: var(--warm); }
+.verdict > b, .verdict p > b { color: var(--chalk); }
+.verdict::before {
+  position: absolute; left: 0; top: 1px; width: 1rem; text-align: center;
+  font: 700 14px/1.4 var(--text);
+}
+.verdict.ok::before { content: "\2713"; color: var(--free); }
+.verdict.ok > b { color: var(--free); }
+.verdict.short::before { content: "!"; color: var(--over); }
+.verdict.short > b, .verdict.short p > b:first-child { color: var(--over); }
+.verdict > p { max-width: none; }
+.verdict > p + p { margin-top: var(--s3); }
+
+/* The action, and its consent when it needs one. The add-a-key door under the
+   rule is the remedy, so it is open exactly when the plan is short. */
+.start { display: flex; flex-direction: column; gap: var(--s4); align-items: flex-start; }
+.start .choice { align-self: stretch; }
+@media (max-width: 40rem) {
+  .start button.primary, .decide > .actions > a.primary { width: 100%; text-align: center; }
+  .decide > .actions { align-items: stretch; }
+}
+details.add-key { border-top: 1px solid var(--rule); padding-top: var(--s4); margin-top: var(--s3); }
+details.add-key > summary { padding: var(--s3) 0; margin: 0; font-weight: 600; }
+details.add-key > form { display: flex; flex-direction: column; gap: var(--s4); margin-top: var(--s3); }
+details.add-key > p { margin-top: var(--s4); }
+.confirm .detail .lines { margin: 0; }
+.confirm .detail h3 { margin-top: var(--s6); }
+/* A primary that cannot be used yet still has to be readable: what it says is
+   part of the decision ("Run what my credit covers — $1.98"). An outline-weight
+   fill in the warm text colour, not the chalk fill at half opacity. */
+button.primary[disabled], button.primary[disabled]:hover {
+  opacity: 1; background: var(--surface-high); color: var(--warm);
+  box-shadow: inset 0 0 0 1px var(--control);
+}
+/* The accounts a sweep would spend from: a row each, the remove control beside
+   its account rather than on a line of its own. */
+ul.accounts { list-style: none; margin: 0; padding: 0; }
+ul.accounts > li {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s4);
+  padding: var(--s3) 0; border-top: 1px solid var(--rule);
+}
+ul.accounts > li:first-child { border-top: 0; }
+ul.accounts form { margin: 0; display: flex; }
+
+/* ==== D5: Progress =======================================================
+
+   What is happening now is the focus: the activity row (a shape, a word, the
+   count, and a bar only where the backend gives a true numerator and
+   denominator). What it is working through sits under it as ruled sections
+   rather than boxes, and the three explanatory panels that used to stand
+   beside it are one door under the work. */
+.flow .panel, .split.ended .panel {
+  background: none; border: 0; border-radius: 0;
+  padding: var(--s5) 0 0; border-top: 1px solid var(--rule);
+}
+.flow .panel:first-child { padding-top: var(--s5); }
+details.pane { border-top: 1px solid var(--rule); min-width: 0; }
+details.pane > summary { padding: var(--s5) 0; margin: 0; }
+details.pane > summary h2 { display: inline; }
+
+/* The count of jobs found is a count: a number in the text colour beside its
+   words, not an amber figure in a well. Amber is for money. */
+.headline-figure.found {
+  background: none; border: 0; padding: 0;
+  flex-direction: row; align-items: baseline; gap: var(--s4);
+}
+.headline-figure.found .numeral { color: var(--chalk); font-size: 34px; line-height: 1.1; margin: 0; }
+
+/* The counts: a ledger. The estimate is amber (money); a spend reading is only
+   there when the account reported one. */
+.figures {
+  margin: 0; padding-top: var(--s5); border-top: 1px solid var(--rule);
+  display: grid; gap: var(--s5) var(--s7);
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+}
+.figures > div { display: flex; flex-direction: column; gap: var(--s1); }
+.figures dt { font-size: 12px; line-height: 16px; font-weight: 500; color: var(--warm); }
+.figures dd { margin: 0; display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s3); }
+.figures dd b { font: 700 22px/1.2 var(--display); letter-spacing: -0.01em; color: var(--chalk); }
+.figures dd b.paid { color: var(--paid); }
+.figures dd b.unknown { font: 500 14px/1.4 var(--text); color: var(--slate); letter-spacing: 0; }
+
+/* Stopped is a ring, not a filled dot: the state is the word and the shape, not
+   only the colour. */
+.activity.off .activity-dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--slate); }
+.activity.off .activity-said > b { color: var(--warm); }
+
+/* How it ended: a shape beside the word (tick, "!", half-disc), and the colour
+   follows the meaning. A run that ended needing attention is coral, not amber:
+   amber is money. A part-run is neither success nor failure and is neutral. */
+.banner b::before {
+  content: ""; display: inline-block; width: 1em; margin-right: var(--s3);
+  text-align: center; font-weight: 700;
+}
+.banner.ok b::before { content: "\2713"; }
+.banner.warn b::before { content: "!"; }
+.banner.part { border-left-color: var(--chalk); }
+.banner.part b::before {
+  width: .8em; height: .8em; vertical-align: -1px; border-radius: 50%; box-sizing: border-box;
+  border: 1.5px solid var(--chalk); background: linear-gradient(90deg, var(--chalk) 50%, transparent 50%);
+}
+.banner .actions { flex: none; }
+
+
+/* The free page: the work in two ruled columns, and the explanation as one
+   door beneath it. */
+.split.one { grid-template-columns: minmax(0, 1fr); }
+@media (min-width: 64rem) {
+  .split.one > .stack { display: grid; grid-template-columns: 1fr 1fr; column-gap: var(--s7); align-items: start; }
+}
+details.about { border-top: 1px solid var(--rule); min-width: 0; }
+details.about > summary { padding: var(--s5) 0; margin: 0; font-weight: 600; }
+.about-body { display: grid; gap: var(--s6); padding-bottom: var(--s5); }
+.about-body > .panel { border: 0; padding: 0; background: none; }
+@media (min-width: 48rem) {
+  .about-body { grid-template-columns: repeat(3, minmax(0, 1fr)); column-gap: var(--s7); }
+}
+.gone { display: none !important; }
+/* An ending with no verdict of its own (you stopped it) gets the quiet shape: a ring. */
+.banner b::before {
+  width: .8em; height: .8em; vertical-align: -1px; border-radius: 50%; box-sizing: border-box;
+  border: 1.5px solid var(--slate);
+}
+.banner.ok b::before, .banner.warn b::before { width: 1em; height: auto; border: 0; border-radius: 0; vertical-align: baseline; }
+
+/* ---- D5 review fixes ---------------------------------------------------- */
+/* Paid search unavailable: the figure is an estimate of something that is not
+   running, so it is not the amber of a live cost. */
+.decide .headline-figure.is-off { border-color: var(--rule); }
+.decide .headline-figure.is-off .numeral { color: var(--slate); }
+/* What is searched for: the titles as one line of words. Eleven chips took five
+   rows on a phone and pushed the action a screen lower. */
+.summary .roles { color: var(--chalk); line-height: 1.5; }
+/* A refusal carries the shape the inline warnings carry. */
+.error.with-shape { position: relative; padding-left: calc(var(--s4) + 1.25rem); }
+.error.with-shape::before {
+  content: "!"; position: absolute; left: var(--s4); top: var(--s3);
+  font: 700 14px/1.4 var(--text); color: var(--over);
+}
+.accounts .tertiary { padding: var(--s3) 0; min-height: 24px; }
+@media (pointer: coarse) { .accounts .tertiary { min-height: 44px; min-width: 44px; } }
+@media (max-width: 40rem) {
+  /* The price by source: the source and its count on one line, the rate and the
+     subtotal on the next, instead of four cells each wrapping a word. */
+  .confirm .detail .lines tr {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--s4);
+    padding: var(--s3) 0; border-top: 1px solid var(--rule);
+  }
+  .confirm .detail .lines td { border: 0; padding: 0; }
+  .confirm .detail .lines td:nth-child(2) { text-align: right; }
+  .confirm .detail .lines td:nth-child(3) { font-size: 12px; color: var(--slate); }
+  .confirm .detail .lines td:nth-child(4) { grid-column: 2; }
+  /* The activity row: the word on its line, its count beneath, then the bar. */
+  .activity-said { flex-wrap: wrap; margin-bottom: var(--s2); }
+  .activity-count { flex-basis: 100%; padding-left: calc(8px + var(--s3)); }
+}

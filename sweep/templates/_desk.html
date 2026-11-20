@@ -1,0 +1,48 @@
+{# The brush desk (public Upload, fresh state only): a toy that shows how Sweep sorts. Seven made-up listings
+   lie scattered on a desk; brush across them and the strong ones land on a shortlist, ranked, while the weak
+   ones are swept away. Illustration only: the desk is aria-hidden, and the two buttons under it are the way to
+   run it without a pointer. Everything here is server-rendered, so without JavaScript a visitor still sees the
+   desk with its cards scattered (each card's resting place is its c<n> class in sweep-a.css — no Jinja inside a style
+   attribute, test_app — and test_a4_upload holds the two to the data-* numbers desk.js reads); static/desk.js (deferred) makes it move, and is the only thing that shows the
+   buttons. The scores are RAW, the way Results prints them (not percentages, and they can be negative); a score
+   of 40 or more is a strong match. The listings are fictional. #}
+{% set cards = [
+  ("Kestrel Payments", "Staff Backend Engineer", "Bengaluru", 104, 2, 4, -7, 18),
+  ("Pebble & Co", "Growth Marketer", "Mumbai", 12, 32, 2, 6, 30),
+  ("Orrin Health", "Platform Engineer", "Hyderabad", 55, 5, 29, 4, 24),
+  ("Halden Labs", "Senior Backend Engineer", "Pune", 62, 34, 27, -5, 14),
+  ("Lumen Bank", "Sales Associate", "Delhi", -3, 2, 54, 7, 28),
+  ("Brightwell", "Product Engineer", "Bengaluru", 47, 32, 53, -3, 20),
+  ("Tidepool", "Visual Designer, Ads", "Gurugram", 21, 16, 77, -9, 34),
+] %}
+<figure class="desk-fig">
+  <div class="desk" data-desk aria-hidden="true">
+    <div class="shortlist">
+      <div class="sl-head"><span>Your shortlist</span><span class="sl-ct" data-desk-count>0 / 4</span></div>
+      <p class="sl-empty" data-desk-empty>Brush the desk. <span>Best matches land here, ranked.</span></p>
+      <p class="sl-foot" data-desk-weak hidden></p>
+    </div>
+    <svg class="trail" viewBox="0 0 100 100" preserveAspectRatio="none" focusable="false"><polyline data-desk-trail points=""/></svg>
+    {%- for co, title, where, m, x, y, r, d in cards %}
+    <div class="jc c{{ loop.index }}" data-x="{{ x }}" data-y="{{ y }}" data-r="{{ r }}" data-d="{{ d }}" data-m="{{ m }}">
+      <div class="jc-co">{{ co }}</div>
+      <div class="jc-t">{{ title }}</div>
+      <div class="jc-ft"><span class="jc-loc">{{ where }}</span><span class="jc-pill {{ 'hi' if m >= 60 else 'mid' if m >= 40 else 'lo' }}">{{ m }}</span></div>
+    </div>
+    {%- endfor %}
+    <div class="brush" data-desk-brush>
+      <svg width="70" height="70" viewBox="0 0 70 70" focusable="false">
+        <path class="b-handle" d="M50 4 L33 32" stroke-width="6" stroke-linecap="round" fill="none"/>
+        <path class="b-glint" d="M50 4 L33 32" stroke-width="2.5" stroke-linecap="round" fill="none"/>
+        <path class="b-bristles" d="M24 27 L42 38 L35 56 C26 59 12 54 7 45 Z" stroke-width="3" stroke-linejoin="round"/>
+        <path class="b-lines" d="M14 47 L23 40 M21 52 L29 44 M29 56 L34 47" stroke-width="2.2" stroke-linecap="round" fill="none"/>
+      </svg>
+    </div>
+  </div>
+  <figcaption class="fig-bar">
+    <p>Try it: drag the brush. Good matches stay, weak ones get swept.</p>
+    <button type="button" class="secondary" data-desk-sweep hidden>Sweep it for me</button>
+    <button type="button" class="tertiary" data-desk-reset hidden>Start over</button>
+  </figcaption>
+</figure>
+<script defer src="{{ url_for('static', filename='desk.js') }}"></script>

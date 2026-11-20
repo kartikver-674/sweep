@@ -1,0 +1,92 @@
+/* The press that leaves the page (canvas concepts L4 and L3). Public pages only; going.js sets the classes.
+
+   L4, every page change: the button stays pressed in and a brush stroke paints along the top of the window, the
+   brush riding its tip, until the next page replaces this one. It crawls to most of the way and then creeps:
+   there is no progress to report, only that the press was heard.
+
+   L3, "Read my résumé" only: the desk's dotted paper grows out of the button over the whole screen and says,
+   one line at a time, what that one wait is (the upload, then the text being read out of it). The reading
+   page takes over from there with its own bar.
+
+   The shuffle (V2, the résumé deck), the unified review's "Looks right, next résumé": the deck's front sheet flies off to the
+   back and the sheets behind it come up one place, while the line paints. The deck's looks and its transitions are sweep-a.css's;
+   this is only where each sheet goes. "Leave this résumé out" is the toss: the front sheet drops off the pile instead. With reduced motion there are no transitions, so the end state is simply there. */
+
+.going-line {
+  position: fixed; inset: 0 0 auto 0; z-index: 1000; height: 6px; pointer-events: none; visibility: hidden;
+}
+.going-fill {
+  position: absolute; left: 0; top: 0; height: 6px; width: 0;
+  background: var(--a-lav); border-radius: 0 6px 6px 0;
+}
+.going-tip { position: absolute; right: -14px; top: -10px; width: 28px; height: 28px; }
+.is-going .going-line { visibility: visible; }
+.is-going .going-fill {
+  animation: going-crawl 3s cubic-bezier(0.1, 0.6, 0.2, 1) forwards, going-creep 30s linear 3s forwards;
+}
+@keyframes going-crawl { from { width: 20%; } to { width: 82%; } }   /* a fifth at once: going.js, Safari */
+@keyframes going-creep { from { width: 82%; } to { width: 94%; } }
+
+/* The press holds: what was pressed stays pushed in, and cannot be pressed twice. */
+.skin-a .going-press, .skin-a .going-press:hover {
+  transform: translate(2px, 2px) !important; box-shadow: 1px 1px 0 var(--a-shadow) !important;
+  cursor: progress; pointer-events: none;
+}
+
+.going-splash {
+  position: fixed; inset: 0; z-index: 1001; visibility: hidden;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+  padding: 24px; text-align: center; color: var(--chalk);
+  background-color: var(--well); background-image: radial-gradient(var(--rule) 1.4px, transparent 1.6px);
+  background-size: 22px 22px;
+  clip-path: circle(0% at var(--going-x, 50%) var(--going-y, 70%));
+}
+.is-splash .going-splash { visibility: visible; clip-path: circle(150% at var(--going-x, 50%) var(--going-y, 70%)); }
+.going-splash h2 { margin: 0; font: 800 clamp(28px, 4vw, 40px)/1.1 var(--display); letter-spacing: -0.02em; }
+.going-splash .going-say { margin: 0; min-height: 1.5em; font-weight: 700; font-size: 17px; color: var(--warm); }
+.going-splash .going-say span:not(.on) { display: none; }
+.going-splash .meta { margin: 0; }
+.going-stroke { width: min(260px, 70vw); height: auto; overflow: visible; }
+.going-path { stroke-dasharray: 100; stroke-dashoffset: 0; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .going-splash { transition: clip-path 0.45s cubic-bezier(0.7, 0, 0.2, 1), visibility 0s 0.45s; }
+  .is-splash .going-splash { transition: clip-path 0.45s cubic-bezier(0.7, 0, 0.2, 1); }
+  .is-splash .going-path { animation: going-sweep 1.7s cubic-bezier(0.6, 0, 0.3, 1) infinite; }
+  .is-splash .going-brush { animation: going-ride 1.7s cubic-bezier(0.6, 0, 0.3, 1) infinite; }
+}
+@keyframes going-sweep { 0% { stroke-dashoffset: 100; } 60% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: -100; } }
+@keyframes going-ride {
+  0% { transform: translateX(0); opacity: 1; } 60% { transform: translateX(196px); opacity: 1; }
+  100% { transform: translateX(196px); opacity: 0; }
+}
+/* Reduced motion: the end state at once. The line stands most of the way along; the splash is simply there. */
+@media (prefers-reduced-motion: reduce) {
+  .is-going .going-fill { animation: none; width: 82%; }
+  .going-brush { transform: translateX(196px); }
+}
+
+/* The shuffle: p0 leaves (over the others while it goes), p1 takes p0's place and p2 p1's. The values are the deck's own. */
+.skin-a.is-shuffle .deck-sheet.p0 { z-index: 4; transform: translate(150px, -30px) rotate(14deg); opacity: 0; }
+.skin-a.is-shuffle .deck-sheet.p1 { transform: rotate(-1.5deg); box-shadow: 6px 6px 0 var(--a-shadow); }
+.skin-a.is-shuffle .deck-sheet.p2 { transform: translate(14px, 24px) rotate(2.5deg); }
+/* Left out (the toss): the same, except the front sheet drops off the pile, down and to the left, instead of going to its back. */
+.skin-a.is-shuffle.is-toss .deck-sheet.p0 { transform: translate(-40px, 190px) rotate(-18deg); }
+
+/* -- The speaker switch (sound.js): beside light and dark, a round sticker with a speaker; citrus when sound is on.
+   It takes the auto margin that pushes the header's tools right, so the theme switch beside it gives its own up. */
+.skin-a .sound-toggle {
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  width: 44px; height: 44px; padding: 0; margin-left: auto; border-radius: 50%;
+  border: 2px solid var(--a-line); background: var(--surface); color: var(--chalk); cursor: pointer;
+}
+.skin-a .sound-toggle[hidden] { display: none; }
+.skin-a .sound-toggle:not([hidden]) ~ .theme-toggle { margin-left: 0; }
+.skin-a .credit ~ .sound-toggle { margin-left: 0; }
+.skin-a .sound-toggle:hover { background: var(--a-tint); }
+.skin-a .sound-toggle[aria-pressed="true"] { background: var(--a-cit); color: var(--a-ink); }
+.skin-a .sound-toggle .spk-on, .skin-a .sound-toggle[aria-pressed="true"] .spk-off { display: none; }
+.skin-a .sound-toggle[aria-pressed="true"] .spk-on { display: block; }
+@media (max-width: 30rem) {
+  .skin-a .sound-toggle { position: absolute; top: var(--s3); right: calc(var(--s5) + 2.75rem + 68px); margin-left: 0; }
+}
